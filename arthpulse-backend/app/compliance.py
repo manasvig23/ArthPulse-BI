@@ -1,29 +1,12 @@
-"""
-Compliance engine.
-
-Five checks an Indian SME can actually be penalised for, all computed from
-the voucher data (plus a few small extra inputs):
-
-    1. Cash received  - Section 269ST  (>= Rs 2 lakh in a day from one party)
-    2. Cash paid      - Section 40A(3) (> Rs 10,000 in a day to one party)
-    3. GST            - input credit vs GSTR-2B, and GSTR-1 vs GSTR-3B
-    4. MSME payments  - Section 43B(h) (45 / 15 day payment limit)
-    5. TDS shortfall  - Section 393 (Income-tax Act 2025)
-
-Every finding carries: severity, party, plain-English summary, rupee
-exposure, a recommended action and the evidence rows behind it.
-
-"""
-
 import math
 from collections import defaultdict
 from datetime import date, timedelta
-
+ 
 from sqlalchemy.orm import Session
-
+ 
 from .models import Voucher, SupplierProfile, Gstr2bInvoice, GstReturn
 from .rules import REFERENCE_DATE
-
+ 
 # ------------------------------------------------------------- settings
 # kind: "statute" = taken from the law as I understand it (verify)
 #       "demo"    = deliberately low so a small business can trigger it
@@ -43,12 +26,12 @@ SETTINGS = {
     "tds_interest_pct_month": (1.0, "assumed"),
     "watch_ratio":          (0.8, "assumed"),    # show "close to the limit" items from 80%
 }
-
-
+ 
+ 
 def S(key):
     return SETTINGS[key][0]
-
-
+ 
+ 
 # TDS: nature of payment -> threshold and rate (Section 393 tables, FY 2026-27 as I understand them)
 TDS_NATURES = {
     "Contractor":     {"label": "Contractor payments", "single": 30000, "annual": 100000,
@@ -58,7 +41,7 @@ TDS_NATURES = {
     "Rent-Building":  {"label": "Rent (land / building)", "monthly": 50000, "rate": 10.0},
     "Rent-Machinery": {"label": "Rent (plant / machinery)", "monthly": 50000, "rate": 2.0},
 }
-
+ 
 NOT_COVERED = [
     "E-invoicing and e-way bills",
     "GSTR-9 annual return and GSTR-9C",
@@ -66,8 +49,8 @@ NOT_COVERED = [
     "Exceptions to the cash-payment limit (for example payments to banks)",
     "TDS: missing PAN (higher rate), technical fees, late deposit of TDS",
 ]
-
-
+ 
+ 
 # -------------------------------------------------------------- helpers
 def inr(n):
     """1234567 -> Rs 12,34,567 (Indian digit grouping)."""
@@ -84,34 +67,34 @@ def inr(n):
             parts.insert(0, head)
         digits = ",".join(parts + [tail])
     return f"{sign}\u20b9{digits}"
-
-
+ 
+ 
 def _plural(n, word):
     return f"{n} {word}" + ("" if n == 1 else "s")
-
-
+ 
+ 
 def _fmt_date(d):
     return d.strftime("%d %b %Y")
-
-
+ 
+ 
 def _month_label(ym):
     y, m = ym.split("-")
     return date(int(y), int(m), 1).strftime("%b %Y")
-
-
+ 
+ 
 def _months_since(d):
     """Whole or part months from d to the reference date (minimum 1)."""
     return max(1, math.ceil((REFERENCE_DATE - d).days / 30))
-
-
+ 
+ 
 def _finding(severity, party, title, summary, exposure, exposure_kind, action, columns, rows):
     return {
         "severity": severity, "party": party, "title": title, "summary": summary,
         "exposure": round(exposure), "exposure_kind": exposure_kind, "action": action,
         "evidence": {"columns": columns, "rows": rows},
     }
-
-
+ 
+ 
 def _settings_view(*keys):
     labels = {
         "cash_receipt_limit": "Cash receipt limit per party per day",
@@ -140,8 +123,8 @@ def _settings_view(*keys):
             shown = inr(v)
         out.append([labels[k], shown, kind])
     return out
-
-
+ 
+ 
 def _rule(rid, name, law, explain, findings, settings, watch=None, ok=None, tables=None, notes=None):
     exposure = sum(f["exposure"] for f in findings)
     return {
@@ -152,8 +135,8 @@ def _rule(rid, name, law, explain, findings, settings, watch=None, ok=None, tabl
         "exposure": exposure, "findings": findings, "settings": settings,
         "watch": watch or [], "ok": ok or [], "tables": tables or [], "notes": notes or [],
     }
-
-
+ 
+ 
 # ----------------------------------------------- 1. Section 269ST (cash in)
 def check_cash_received(db: Session):
     limit = S("cash_receipt_limit")
@@ -162,7 +145,7 @@ def check_cash_received(db: Session):
     groups = defaultdict(list)
     for v in rows:
         groups[(v.party_name, v.voucher_date)].append(v)
-
+ 
     findings, watch = [], []
     for (party, day), vs in sorted(groups.items(), key=lambda kv: kv[0][1]):
         total = sum(v.amount for v in vs)
@@ -181,7 +164,7 @@ def check_cash_received(db: Session):
         elif total >= limit * S("watch_ratio"):
             watch.append(f"{party} paid {inr(total)} in cash on {_fmt_date(day)} "
                          f"({total / limit * 100:.0f}% of the limit).")
-
+ 
     return _rule(
         "cash_received", "Cash received limit",
         "Section 269ST (old Act). Reported as Section 186 in the Income-tax Act 2025 \u2013 verify.",
@@ -190,8 +173,8 @@ def check_cash_received(db: Session):
         findings, _settings_view("cash_receipt_limit"), watch=watch,
         notes=["Cannot detect the 'single transaction' and 'one event or occasion' limbs across days, "
                "because receipts are not linked to invoices."])
-
-
+ 
+ 
 # --------------------------------------------- 2. Section 40A(3) (cash out)
 def check_cash_paid(db: Session):
     profiles = {p.party_name: p for p in db.query(SupplierProfile).all()}
@@ -200,7 +183,7 @@ def check_cash_paid(db: Session):
     groups = defaultdict(list)
     for v in rows:
         groups[(v.party_name, v.voucher_date)].append(v)
-
+ 
     rate = S("assumed_tax_rate")
     findings, watch = [], []
     for (party, day), vs in sorted(groups.items(), key=lambda kv: kv[0][1]):
@@ -223,7 +206,7 @@ def check_cash_paid(db: Session):
             tag = " (transporter limit)" if transporter else ""
             watch.append(f"{party} was paid {inr(total)} in cash on {_fmt_date(day)}{tag} "
                          f"\u2013 {total / limit * 100:.0f}% of the {inr(limit)} limit.")
-
+ 
     return _rule(
         "cash_paid", "Cash payment limit",
         "Section 40A(3) (old Act). New-Act section number not verified.",
@@ -233,13 +216,13 @@ def check_cash_paid(db: Session):
         watch=watch,
         notes=["Checks payments only; the law also looks at the bill amount. "
                "Exceptions (for example payments to banks) are not modelled."])
-
-
+ 
+ 
 # --------------------------------------------------------- 3. GST returns
 def _gst_checks(db: Session):
     """Returns (findings, monthly_itc_table, chase_table, output_table)."""
     interest_pa = S("gst_interest_pct_pa")
-
+ 
     purchases = db.query(Voucher).filter(Voucher.voucher_type == "Purchase").all()
     sales = db.query(Voucher).filter(Voucher.voucher_type == "Sales").all()
     two_b = {(i.supplier_gstin, i.invoice_no): i for i in db.query(Gstr2bInvoice).all()}
@@ -247,7 +230,7 @@ def _gst_checks(db: Session):
     for i in two_b.values():
         two_b_by_month[i.month] += i.tax_amount
     returns = db.query(GstReturn).order_by(GstReturn.month).all()
-
+ 
     # --- match each purchase invoice against GSTR-2B
     unmatched_by_month = defaultdict(list)
     books_itc = defaultdict(float)
@@ -259,7 +242,7 @@ def _gst_checks(db: Session):
             unmatched_by_month[month].append((v, "Missing from GSTR-2B"))
         elif abs(match.tax_amount - (v.gst_amount or 0)) > 1:
             unmatched_by_month[month].append((v, "Amount differs"))
-
+ 
     findings, itc_rows = [], []
     for r in returns:
         claimed = r.gstr3b_itc_claimed
@@ -294,7 +277,7 @@ def _gst_checks(db: Session):
                 ["Supplier", "Invoice", "Invoice date", "Tax", "Issue"],
                 [[v.party_name, v.invoice_no, _fmt_date(v.voucher_date), inr(v.gst_amount or 0), why]
                  for v, why in items]))
-
+ 
     # --- chase list: every unmatched invoice, grouped by supplier
     chase = defaultdict(lambda: {"n": 0, "tax": 0.0, "oldest": None})
     for items in unmatched_by_month.values():
@@ -305,7 +288,7 @@ def _gst_checks(db: Session):
             c["oldest"] = v.voucher_date if c["oldest"] is None else min(c["oldest"], v.voucher_date)
     chase_rows = [[s, c["n"], inr(c["tax"]), _fmt_date(c["oldest"])]
                   for s, c in sorted(chase.items(), key=lambda kv: -kv[1]["tax"])]
-
+ 
     # --- output tax: GSTR-1 reported vs GSTR-3B paid
     books_out = defaultdict(float)
     for v in sales:
@@ -335,10 +318,10 @@ def _gst_checks(db: Session):
                 ["Month", "Per sales books", "GSTR-1 tax", "GSTR-3B paid", "Gap"],
                 [[_month_label(r.month), inr(books_out.get(r.month, 0)), inr(r.gstr1_tax),
                   inr(r.gstr3b_tax_paid), inr(gap)]]))
-
+ 
     return findings, itc_rows, chase_rows, out_rows
-
-
+ 
+ 
 def check_gst(db: Session):
     findings, itc_rows, chase_rows, out_rows = _gst_checks(db)
     tables = [
@@ -363,8 +346,8 @@ def check_gst(db: Session):
                "are much higher, so a small business would rarely get a notice \u2013 the real value "
                "here is catching supplier gaps early.",
                "GSTR-2B and GSTR-3B figures are synthetic in this build."])
-
-
+ 
+ 
 # ---------------------------------------------------- 4. MSME 43B(h)
 def check_msme(db: Session):
     profiles = {p.party_name: p for p in db.query(SupplierProfile).all()}
@@ -385,7 +368,7 @@ def check_msme(db: Session):
         elif limit - days <= 7:
             watch.append(f"{v.party_name}: {inr(v.amount)} bill dated {_fmt_date(v.voucher_date)} "
                          f"has {limit - days} day(s) left before the {limit}-day limit.")
-
+ 
     findings = []
     for party, items in breached.items():
         total = sum(v.amount for v, _, _ in items)
@@ -404,7 +387,7 @@ def check_msme(db: Session):
             ["Bill date", "Amount", "Days outstanding", "Limit (days)", "Days over"],
             [[_fmt_date(v.voucher_date), inr(v.amount), d, lim, d - lim] for v, d, lim in items]))
     findings.sort(key=lambda f: -f["exposure"])
-
+ 
     return _rule(
         "msme", "MSME payment deadline",
         "Section 43B(h) (old Act). Reported as Section 37(2)(g) in the Income-tax Act 2025 \u2013 verify.",
@@ -414,14 +397,14 @@ def check_msme(db: Session):
         watch=watch,
         notes=["Counts days from the bill date; the law counts from acceptance of the goods.",
                "Whether a supplier is MSME comes from the supplier profile table, not from Tally."])
-
-
+ 
+ 
 # ------------------------------------------------------------- 5. TDS
 def _fy_start():
     ref = REFERENCE_DATE
     return date(ref.year if ref.month >= 4 else ref.year - 1, 4, 1)
-
-
+ 
+ 
 def check_tds(db: Session):
     profiles = {p.party_name: p for p in db.query(SupplierProfile).all()}
     fy_start = _fy_start()
@@ -430,7 +413,7 @@ def check_tds(db: Session):
     groups = defaultdict(list)
     for v in pays:
         groups[(v.party_name, v.nature)].append(v)
-
+ 
     interest_pm = S("tds_interest_pct_month")
     findings, watch, ok = [], [], []
     for (party, nature), vs in sorted(groups.items()):
@@ -443,20 +426,20 @@ def check_tds(db: Session):
             rate = spec["rate_individual"] if (prof and prof.payee_type == "Individual") else spec["rate_other"]
         else:
             rate = spec["rate"]
-
+ 
         if "monthly" in spec:
             eligible = [v for v in vs if v.amount > spec["monthly"]]
         else:
             triggered = total > spec["annual"] or (
                 "single" in spec and any(v.amount > spec["single"] for v in vs))
             eligible = vs if triggered else []
-
+ 
         if not eligible:
             if "annual" in spec and total >= spec["annual"] * S("watch_ratio"):
                 watch.append(f"{party} ({spec['label'].lower()}): {inr(total)} paid this year, "
                              f"{total / spec['annual'] * 100:.0f}% of the {inr(spec['annual'])} threshold.")
             continue
-
+ 
         required = sum(rate / 100 * v.amount for v in eligible)
         deducted = sum(v.tds_deducted or 0 for v in eligible)
         rows, shortfall, interest = [], 0.0, 0.0
@@ -467,12 +450,12 @@ def check_tds(db: Session):
             interest += short * interest_pm / 100 * _months_since(v.voucher_date)
             rows.append([_fmt_date(v.voucher_date), inr(v.amount), f"{rate:g}%", inr(req),
                          inr(v.tds_deducted or 0), inr(short)])
-
+ 
         if shortfall < 1:
             ok.append(f"{party} ({spec['label'].lower()}): {inr(total)} paid, TDS {inr(deducted)} "
                       f"deducted at {rate:g}% \u2013 correct.")
             continue
-
+ 
         findings.append(_finding(
             "high" if shortfall >= 10000 else "medium", party,
             f"TDS short by {inr(shortfall)} on {spec['label'].lower()}",
@@ -484,7 +467,7 @@ def check_tds(db: Session):
             "Deposit the shortfall with interest and deduct at the correct rate from the next payment. "
             "Collect the payee's PAN and category (individual or company) before paying.",
             ["Payment date", "Gross payment", "Rate", "TDS required", "TDS deducted", "Shortfall"], rows))
-
+ 
     findings.sort(key=lambda f: -f["exposure"])
     return _rule(
         "tds", "TDS shortfall",
@@ -501,8 +484,8 @@ def check_tds(db: Session):
                           ["Rent (plant / machinery)", "\u20b950,000 a month", "2%"]]}],
         notes=["Applies the rate to every payment once a threshold is crossed (a simplification).",
                "Not covered: missing PAN (higher rate), technical fees and late deposit of TDS."])
-
-
+ 
+ 
 # ------------------------------------------------------------- assembly
 def build_compliance(db: Session):
     rules = [check_cash_received(db), check_cash_paid(db), check_gst(db),
@@ -523,12 +506,13 @@ def build_compliance(db: Session):
                        "This is not tax advice. Thresholds tagged 'demo' or 'assumed' are "
                        "adjustable settings; confirm all figures against official sources."),
     }
-
-
+ 
+ 
 def alert_rows(db: Session):
-    """Findings in the [severity, title, description] shape the Alert Centre uses."""
+    """Findings in the [severity, title, description, area] shape the Alert Centre uses."""
     rows = []
     for rule in build_compliance(db)["rules"]:
         for f in rule["findings"]:
-            rows.append([f["severity"], f"{rule['name']}: {f['title']}", f["summary"]])
+            rows.append([f["severity"], f"{rule['name']}: {f['title']}", f["summary"], "compliance"])
     return rows
+ 

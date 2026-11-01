@@ -93,13 +93,13 @@ def get_alerts(db: Session):
     for it in db.query(InventoryItem).all():
         if it.quantity < 0:
             alerts.append(["high", "Negative stock requires review",
-                            f"{it.product} has {int(it.quantity)} units in the {it.branch}."])
+                            f"{it.product} has {int(it.quantity)} units in the {it.branch}.", "inventory"])
         elif it.quantity < it.reorder_level:
             alerts.append(["medium", "Product below reorder level",
-                            f"{it.product} is at {int(it.quantity)} units, below the {int(it.reorder_level)}-unit reorder point."])
+                            f"{it.product} is at {int(it.quantity)} units, below the {int(it.reorder_level)}-unit reorder point.", "inventory"])
         elif it.quantity > it.reorder_level * 4:
             alerts.append(["low", "Slow-moving stock needs action",
-                            f"₹{it.value/100000:.1f}L of {it.product} is overstocked at {it.branch}."])
+                            f"₹{it.value/100000:.1f}L of {it.product} is overstocked at {it.branch}.", "inventory"])
  
     overdue = defaultdict(list)   # (Receivable/Payable, party) -> [vouchers]
     for v in db.query(Voucher).filter(Voucher.payment_type.isnot(None),
@@ -114,7 +114,7 @@ def get_alerts(db: Session):
         alerts.append(["high" if oldest > 60 else "medium",
                        f"{ptype} overdue",
                        f"{party} has {len(rows)} overdue item(s) totalling "
-                       f"\u20b9{total:,.0f}, oldest {oldest} days past due."])
+                       f"\u20b9{total:,.0f}, oldest {oldest} days past due.", "cashflow"])
  
     order = {"high": 0, "medium": 1, "low": 2}
     alerts.sort(key=lambda a: order.get(a[0], 3))

@@ -449,7 +449,7 @@ if __name__ == "__main__":
     ap.add_argument("--gstr2b", help="gstr2b_invoices.xlsx")
     ap.add_argument("--gst-returns", dest="gst_returns", help="gst_returns.xlsx")
     ap.add_argument("--reset", action="store_true",
-                    help="rebuild the database tables (wipes ALL existing data) before importing")
+                    help="rebuild the data tables (wipes imported data, keeps user accounts) before importing")
     a = ap.parse_args()
  
     if not any([a.sales, a.purchases, a.payments, a.stock, a.suppliers, a.gstr2b, a.gst_returns]):
@@ -457,10 +457,12 @@ if __name__ == "__main__":
         sys.exit(1)
  
     if a.reset:
-        # drop_all + create_all (not just DELETE) so new columns / tables are picked up
-        Base.metadata.drop_all(bind=engine)
+        # drop + create (not just DELETE) so new columns / tables are picked up.
+        # The users table is deliberately left alone: accounts are entered by hand.
+        data_tables = [t for t in Base.metadata.sorted_tables if t.name != "users"]
+        Base.metadata.drop_all(bind=engine, tables=data_tables)
         Base.metadata.create_all(bind=engine)
-        print("Rebuilt all tables.")
+        print("Rebuilt the data tables (user accounts were kept).")
     db = SessionLocal()
  
     total = 0
@@ -481,3 +483,4 @@ if __name__ == "__main__":
     db.commit()
     db.close()
     print(f"Done. {total} records imported.")
+ 

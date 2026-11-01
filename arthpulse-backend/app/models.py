@@ -95,3 +95,16 @@ class GstReturn(Base):
     gstr1_tax = Column(Float, default=0)                  # output tax reported in GSTR-1
     gstr3b_tax_paid = Column(Float, default=0)            # output tax paid in GSTR-3B
     gstr3b_itc_claimed = Column(Float, default=0)         # input credit claimed in GSTR-3B
+ 
+ 
+class User(Base):
+    """A person who can sign in. The role decides which areas of the app they can use."""
+    __tablename__ = "users"
+ 
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, nullable=False)
+    full_name = Column(String, nullable=False)
+    role = Column(String, nullable=False)             # key into auth.ROLES
+    password_hash = Column(String, nullable=False)    # PBKDF2 hash, never the password itself
+    is_active = Column(Boolean, default=True)
+ 
