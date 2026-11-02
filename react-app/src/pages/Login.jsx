@@ -29,7 +29,7 @@ export default function Login({ onSignedIn }) {
   return (
     <div className="login-shell">
       <div className="login-card">
-        <div className="login-brand"><Logo size={44} /><span>Arth</span><span>Pulse</span></div>
+        <div className="login-brand"><Logo size={44} /><span>Arth<b>Pulse</b></span></div>
         <h1>Sign in</h1>
         <p className="subtext">Use the account your administrator created for you.</p>
 

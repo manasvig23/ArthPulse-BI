@@ -273,7 +273,7 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
           <button className="mobile-menu" onClick={() => setMenuOpen(o => !o)} aria-label="Open menu">☰</button>
           <a className="brand-pill" href={`#${allowed[0]}`} onClick={() => setMenuOpen(false)}>
             <Logo size={38} />
-            <span>Arth <b>Pulse</b></span>
+            <span>Arth<b>Pulse</b></span>
           </a>
 
           <div className="top-actions">
