@@ -2,18 +2,24 @@ import { useState } from "react";
 import PageHeading from "../components/PageHeading.jsx";
 import { downloadText, formatMoney } from "../format.js";
 
-const OPTIONS = ["Sales performance", "Purchase health", "Inventory health", "Cash flow", "Risks and alerts"];
+const ALL_OPTIONS = ["Sales performance", "Purchase health", "Inventory health", "Cash flow", "Risks and alerts"];
 
-export default function Reports({ data, notify }) {
-  const [selected, setSelected] = useState(OPTIONS.slice(0, 4));
+export default function Reports({ data, notify, user }) {
   const { summary, alerts } = data;
   const s = summary.sales, p = summary.purchases, i = summary.inventory, c = summary.cashflow;
 
+  // a role only sees the report blocks for the areas it may open
+  const available = {
+    "Sales performance": !!s, "Purchase health": !!p, "Inventory health": !!i,
+    "Cash flow": !!c, "Risks and alerts": !!user?.areas?.includes("alerts"),
+  };
+  const OPTIONS = ALL_OPTIONS.filter(o => available[o]);
+  const [selected, setSelected] = useState(OPTIONS.slice(0, 4));
   const descriptions = {
-    "Sales performance": `Net sales ${formatMoney(s.net)} (${s.growth === null ? "no prior-period data" : s.growth + "% vs previous period"}) for ${summary.label.toLowerCase()}.`,
-    "Purchase health": `${formatMoney(p.total)} purchases; ${p.top_supplier} is ${p.top_share}% of spend.`,
-    "Inventory health": `${formatMoney(i.stock_value)} stock value, ${i.low_stock} low-stock and ${i.negative} negative-stock risk(s).`,
-    "Cash flow": `${formatMoney(c.receivables)} receivables, ${formatMoney(c.payables)} payables, cash conversion cycle ${c.working_capital[3][1]}.`,
+    "Sales performance": s && `Net sales ${formatMoney(s.net)} (${s.growth === null ? "no prior-period data" : s.growth + "% vs previous period"}) for ${summary.label.toLowerCase()}.`,
+    "Purchase health": p && `${formatMoney(p.total)} purchases; ${p.top_supplier} is ${p.top_share}% of spend.`,
+    "Inventory health": i && `${formatMoney(i.stock_value)} stock value, ${i.low_stock} low-stock and ${i.negative} negative-stock risk(s).`,
+    "Cash flow": c && `${formatMoney(c.receivables)} receivables, ${formatMoney(c.payables)} payables, cash conversion cycle ${c.working_capital[3][1]}.`,
     "Risks and alerts": `${alerts.length} active alerts need review.`,
   };
 

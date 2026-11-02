@@ -17,7 +17,7 @@ body.dark .rule-tab.active{background:#1f3d2e;color:#e7f0eb}
 .headline.ok{color:#238067}.headline.at_risk{color:#cf5d59}
 
 .settings-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px;margin:16px 0 0;padding:0;list-style:none}
-.settings-list li{display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:space-between;padding:9px 11px;border-radius:8px;background:#f2f8f5;font-size:11px}
+.settings-list li{display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:space-between;padding:9px 11px;border-radius:8px;background:var(--mint-soft,#f3efe4);font-size:11px}
 body.dark .settings-list li{background:#1c3026}
 .settings-list span{color:var(--muted)}
 .tag{padding:2px 7px;border-radius:99px;font-size:9px;font-weight:700;font-style:normal;text-transform:uppercase;letter-spacing:.5px}
@@ -34,7 +34,7 @@ body.dark .settings-list li{background:#1c3026}
 .exposure b{display:block;font:700 17px Manrope}
 .exposure small{color:var(--muted);font-size:10px}
 .finding-summary{margin:12px 0;font-size:12.5px;line-height:1.55}
-.callout{padding:11px 13px;border-radius:8px;background:#eef7f2;font-size:12px;line-height:1.5}
+.callout{padding:11px 13px;border-radius:8px;background:var(--mint-soft,#f3efe4);font-size:12px;line-height:1.5}
 body.dark .callout{background:#1c3026}
 .callout strong{display:block;margin-bottom:3px;color:var(--green);font-size:10px;letter-spacing:.8px}
 .finding details{margin-top:12px}

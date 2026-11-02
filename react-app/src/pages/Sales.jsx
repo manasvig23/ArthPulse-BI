@@ -18,7 +18,7 @@ const columns = [
 
 export default function Sales({ data, notify }) {
   const s = data.summary.sales;
-  const trend = data.summary.overview.trend;
+  const trend = s.trend;
 
   const exportCsv = () => {
     downloadCsv("sales", [["Customer", "Product", "Territory", "Salesperson", "Sales", "Returns", "Segment"], ...data.sales]);

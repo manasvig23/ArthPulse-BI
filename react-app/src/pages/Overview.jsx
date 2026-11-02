@@ -4,19 +4,24 @@ import StatusBadge from "../components/StatusBadge.jsx";
 import { TrendChart } from "../components/Charts.jsx";
 import { formatMoney, growthText, growthTone } from "../format.js";
 
-export default function Overview({ data, onNavigate }) {
+function greeting() {
+  const h = new Date().getHours();
+  return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
+}
+
+export default function Overview({ data, onNavigate, user }) {
   const o = data.summary.overview;
 
   return (
     <section className="page active">
       <PageHeading
         eyebrow="BUSINESS OVERVIEW"
-        title="Here’s your business pulse."
-        subtext="Performance, stock, collections and risks in one view."
+        title={<>{greeting()}, {user?.full_name || "there"}<br />Here’s your business pulse</>}
+        subtext="Performance, collections, stock and risks in one view."
       />
 
       <KpiGrid>
-        <Kpi label="NET SALES" value={formatMoney(o.net_sales)} detail={growthText(o.growth)} tone={growthTone(o.growth)} />
+        <Kpi label="NET SALES" value={formatMoney(o.net_sales)} detail={growthText(o.growth)} tone={growthTone(o.growth)} spark={o.trend.net} />
         <Kpi
           label="SALES LESS PURCHASES"
           value={formatMoney(o.sales_less_purchases)}

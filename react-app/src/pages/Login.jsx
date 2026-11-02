@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { login, setToken } from "../api.js";
+import { Logo } from "../components/Kpi.jsx";
 import "../auth.css";
 
 const UNREACHABLE = "Cannot reach the backend. Is it running on port 8000?";
@@ -28,7 +29,7 @@ export default function Login({ onSignedIn }) {
   return (
     <div className="login-shell">
       <div className="login-card">
-        <div className="login-brand"><span className="brand-mark">A</span><span>Arth</span><span>Pulse</span></div>
+        <div className="login-brand"><Logo size={44} /><span>Arth</span><span>Pulse</span></div>
         <h1>Sign in</h1>
         <p className="subtext">Use the account your administrator created for you.</p>
 

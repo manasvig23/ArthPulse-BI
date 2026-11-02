@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getJson, getToken, setToken, useDashboardData } from "./api.js";
-import { downloadCsv } from "./format.js";
+import { downloadCsv, formatMoney } from "./format.js";
+import { Icon, Logo } from "./components/Kpi.jsx";
 import Login from "./pages/Login.jsx";
 import Overview from "./pages/Overview.jsx";
 import Sales from "./pages/Sales.jsx";
@@ -27,10 +28,10 @@ const PAGES = {
 };
 
 const NAV = [
-  { title: "BUSINESS INTELLIGENCE", items: [["overview", "⌘ Overview"]] },
-  { title: "ANALYTICS", items: [["sales", "↗ Sales"], ["purchases", "↓ Purchases"], ["inventory", "□ Inventory"], ["cashflow", "₹ Cash Flow"]] },
-  { title: "WORKSPACE", items: [["compliance", "⚖ Compliance"], ["alerts", "● Alert Centre"], ["reports", "▤ Reports"]] },
-  { title: "ADMINISTRATION", items: [["access", "⚙ Access control"]] },
+  { title: "BUSINESS INTELLIGENCE", items: [["overview", "overview"]] },
+  { title: "ANALYTICS", items: [["sales", "trend"], ["purchases", "down"], ["inventory", "folder"], ["cashflow", "rupee"]] },
+  { title: "WORKSPACE", items: [["compliance", "shield"], ["alerts", "bell"], ["reports", "file"]] },
+  { title: "ADMINISTRATION", items: [["access", "gear"]] },
 ];
 
 const PERIODS = [
@@ -39,6 +40,75 @@ const PERIODS = [
 const PERIOD_AWARE = ["overview", "sales", "purchases", "reports"];
 
 const initials = name => name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase();
+
+// Small status chips shown beside sidebar items, computed from the loaded data.
+function navBadges(data) {
+  if (!data) return {};
+  const s = data.summary || {};
+  const out = {};
+
+  const g = s.sales?.growth;
+  if (g !== null && g !== undefined && Math.abs(g) <= 500) {
+    out.sales = { text: `${g >= 0 ? "+" : ""}${g}%`, tone: g >= 0 ? "good" : "bad" };
+  }
+  if (s.purchases) out.purchases = { text: formatMoney(s.purchases.total), tone: "plain" };
+
+  const risks = (s.inventory?.low_stock || 0) + (s.inventory?.negative || 0);
+  if (s.inventory && risks > 0) out.inventory = { text: `${risks} ${risks === 1 ? "risk" : "risks"}`, tone: "warn" };
+
+  if (s.cashflow) out.cashflow = { dot: (s.cashflow.overdue_receivables || 0) > 0 ? "warn" : "good" };
+
+  if (data.compliance) {
+    const n = data.compliance.summary.rules_at_risk;
+    out.compliance = n > 0 ? { text: `${n} at risk`, tone: "bad" } : { text: "✓ OK", tone: "good" };
+  }
+  if (data.alerts.length) out.alerts = { text: String(data.alerts.length), tone: "danger" };
+  return out;
+}
+
+function UserMenu({ user, dark, onToggleTheme, onSignOut, onOpenAccess }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOutside = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const closeEsc = e => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", closeOutside);
+    document.addEventListener("keydown", closeEsc);
+    return () => {
+      document.removeEventListener("mousedown", closeOutside);
+      document.removeEventListener("keydown", closeEsc);
+    };
+  }, [open]);
+
+  return (
+    <div className="user-menu" ref={ref}>
+      <button className="user-pill" onClick={() => setOpen(o => !o)} aria-haspopup="menu" aria-expanded={open}>
+        <span className="avatar">{initials(user.full_name)}</span>
+        <span className="user-meta"><strong>{user.full_name}</strong><small>{user.role_label}</small></span>
+        <Icon name="chevron" size={16} />
+      </button>
+
+      {open && (
+        <div className="menu" role="menu">
+          <div className="menu-head"><strong>{user.full_name}</strong><small>@{user.username} · {user.role_label}</small></div>
+          {onOpenAccess && (
+            <button role="menuitem" onClick={() => { setOpen(false); onOpenAccess(); }}>
+              <Icon name="key" size={16} /> Access control
+            </button>
+          )}
+          <button role="menuitem" onClick={() => { onToggleTheme(); setOpen(false); }}>
+            <Icon name={dark ? "sun" : "moon"} size={16} /> {dark ? "Light theme" : "Dark theme"}
+          </button>
+          <button role="menuitem" className="danger" onClick={onSignOut}>
+            <Icon name="logout" size={16} /> Sign out
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ------------------------------------------------------------------ root
 export default function App() {
@@ -83,6 +153,7 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
   const [dark, setDark] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [toast, setToast] = useState("");
+  const [confirmOut, setConfirmOut] = useState(false);
   const toastTimer = useRef(null);
 
   const { data, loading, error, reload } = useDashboardData(period, user.areas, onSignOut);
@@ -139,13 +210,28 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
 
   const Page = PAGES[page].component;
   const needsData = page !== "access";
+  const badges = navBadges(data);
+  const alertCount = data ? data.alerts.length : 0;
+
+  // The copilot card quotes real figures from the loaded data (rule-based for now).
+  const insight = (() => {
+    if (!data) return "Reading your data…";
+    const c = data.compliance?.summary;
+    if (c && c.findings > 0) {
+      return `${c.findings} compliance ${c.findings === 1 ? "finding needs" : "findings need"} review. ${formatMoney(c.amount_flagged)} flagged.`;
+    }
+    if (alertCount > 0) return `${alertCount} ${alertCount === 1 ? "alert needs" : "alerts need"} your attention.`;
+    return "No open risks right now.";
+  })();
+  const insightTarget = allowed.includes("compliance") ? "compliance" : allowed.includes("alerts") ? "alerts" : allowed[0];
 
   return (
     <div className="app-shell">
       <aside className={`sidebar ${menuOpen ? "open" : ""}`}>
-        <a className="brand" href={`#${allowed[0]}`} onClick={() => setMenuOpen(false)}>
-          <span className="brand-mark">A</span>Arth<span>Pulse</span>
-        </a>
+        <div className="workspace-pulse">
+          <span>WORKSPACE PULSE</span>
+          <em className={`live ${error ? "off" : ""}`}><i />{error ? "OFFLINE" : "CONNECTED"}</em>
+        </div>
 
         <nav className="nav">
           {NAV.map(group => {
@@ -154,34 +240,41 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
             return (
               <div key={group.title}>
                 <p className="nav-title">{group.title}</p>
-                {items.map(([id, label]) => (
-                  <button key={id} className={`nav-link ${page === id ? "active" : ""}`} onClick={() => navigate(id)}>
-                    {label}
-                    {id === "alerts" && <b>{data ? data.alerts.length : 0}</b>}
-                  </button>
-                ))}
+                {items.map(([id, icon]) => {
+                  const badge = badges[id];
+                  return (
+                    <button key={id} className={`nav-link ${page === id ? "active" : ""}`} onClick={() => navigate(id)}>
+                      <Icon name={icon} size={18} />
+                      <span className="nav-label">{PAGES[id].label}</span>
+                      {badge?.text && <b className={`chip ${badge.tone}`}>{badge.text}</b>}
+                      {badge?.dot && <i className={`status-dot ${badge.dot}`} />}
+                      {!badge && page === id && <i className="status-dot active-dot" />}
+                    </button>
+                  );
+                })}
               </div>
             );
           })}
         </nav>
 
-        <div className="sidebar-bottom">
-          <div className="ai-card">✦ <span><strong>Arth AI</strong><small>Coming soon</small></span></div>
-          <div className="user-block">
-            <span className="avatar">{initials(user.full_name)}</span>
-            <span className="user-meta"><strong>{user.full_name}</strong><small>{user.role_label}</small></span>
+        <div className="copilot">
+          <div className="copilot-head">
+            <span className="copilot-icon"><Icon name="spark" size={14} /></span>
+            <strong>Arth AI Copilot</strong>
+            <small>PREVIEW</small>
           </div>
-          <div className="user-actions">
-            <button onClick={() => setDark(d => !d)}>◐ Theme</button>
-            <button onClick={onSignOut}>⎋ Sign out</button>
-          </div>
+          <p>{insight}</p>
+          <button onClick={() => navigate(insightTarget)}>Explore insights <Icon name="arrow" size={14} /></button>
         </div>
       </aside>
 
       <main className="main-content">
         <header className="topbar">
-          <button className="mobile-menu" onClick={() => setMenuOpen(o => !o)}>☰</button>
-          <div className="breadcrumbs">ArthPulse <span>/</span> <strong>{PAGES[page].label}</strong></div>
+          <button className="mobile-menu" onClick={() => setMenuOpen(o => !o)} aria-label="Open menu">☰</button>
+          <a className="brand-pill" href={`#${allowed[0]}`} onClick={() => setMenuOpen(false)}>
+            <Logo size={38} />
+            <span>Arth <b>Pulse</b></span>
+          </a>
 
           <div className="top-actions">
             {PERIOD_AWARE.includes(page) && (
@@ -189,7 +282,25 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
                 {PERIODS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             )}
-            {needsData && <button className="primary-button" onClick={exportCurrent}>⇩ Export current view</button>}
+            {needsData && <button className="primary-button" onClick={exportCurrent}>⇩ Export</button>}
+            <button
+              className="bell"
+              aria-label={`Alerts (${alertCount})`}
+              onClick={() => navigate(allowed.includes("alerts") ? "alerts" : allowed[0])}
+            >
+              <Icon name="bell" size={18} />
+              {alertCount > 0 && <i className="bell-dot" />}
+            </button>
+            <UserMenu
+              user={user}
+              dark={dark}
+              onToggleTheme={() => setDark(d => !d)}
+              onSignOut={() => setConfirmOut(true)}
+              onOpenAccess={allowed.includes("access") ? () => navigate("access") : null}
+            />
+            <button className="signout-button" onClick={() => setConfirmOut(true)} title="Sign out">
+              <Icon name="logout" size={16} /><span>Sign out</span>
+            </button>
           </div>
         </header>
 
@@ -219,6 +330,19 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
 
         {(data || !needsData) && <Page data={data} notify={notify} onNavigate={navigate} user={user} onUserChanged={onUserChanged} />}
       </main>
+
+      {confirmOut && (
+        <div className="modal-backdrop" onClick={() => setConfirmOut(false)}>
+          <div className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
+            <h3>Log out?</h3>
+            <p>Are you sure you want to log out?</p>
+            <div className="modal-actions">
+              <button className="secondary-button" autoFocus onClick={() => setConfirmOut(false)}>Cancel</button>
+              <button className="danger-button" onClick={onSignOut}>Yes, log out</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className={`toast ${toast ? "show" : ""}`}>{toast}</div>
     </div>
