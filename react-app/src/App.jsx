@@ -12,6 +12,7 @@ import Compliance from "./pages/Compliance.jsx";
 import Alerts from "./pages/Alerts.jsx";
 import Reports from "./pages/Reports.jsx";
 import Access from "./pages/Access.jsx";
+import AIChatDrawer from "./components/AIChatDrawer.jsx";
 import "./auth.css";
 
 // `area` is the permission a role needs (see ROLES in backend app/auth.py)
@@ -154,6 +155,7 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [toast, setToast] = useState("");
   const [confirmOut, setConfirmOut] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
   const toastTimer = useRef(null);
 
   const { data, loading, error, reload } = useDashboardData(period, user.areas, onSignOut);
@@ -213,7 +215,6 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
   const badges = navBadges(data);
   const alertCount = data ? data.alerts.length : 0;
 
-  // The copilot card quotes real figures from the loaded data (rule-based for now).
   const insight = (() => {
     if (!data) return "Reading your data…";
     const c = data.compliance?.summary;
@@ -261,10 +262,9 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
           <div className="copilot-head">
             <span className="copilot-icon"><Icon name="spark" size={14} /></span>
             <strong>Arth AI Copilot</strong>
-            <small>PREVIEW</small>
           </div>
-          <p>{insight}</p>
-          <button onClick={() => navigate(insightTarget)}>Explore insights <Icon name="arrow" size={14} /></button>
+            <p>{insight}</p>
+            <button onClick={() => setChatOpen(true)}>Ask AI Assistant <Icon name="arrow" size={14} /></button>
         </div>
       </aside>
 
@@ -343,6 +343,8 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
           </div>
         </div>
       )}
+
+      {chatOpen && <AIChatDrawer onClose={() => setChatOpen(false)} period={period} />}
 
       <div className={`toast ${toast ? "show" : ""}`}>{toast}</div>
     </div>

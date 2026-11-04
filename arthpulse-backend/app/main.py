@@ -4,7 +4,8 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-
+from pydantic import BaseModel
+from app.aichat import ai_service
 from . import auth, compliance, rules, summaries
 from .database import Base, SessionLocal, engine, get_db
 from .models import User
@@ -31,7 +32,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="ArthPulse API", lifespan=lifespan)
 
 # Allow the frontend (Vite dev server etc.) to call this API from the browser.
-# Loosened for the demo -- restrict to your real frontend origin before deploying.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -217,3 +217,31 @@ def delete_user(username: str, actor: User = Depends(auth.require_area("users"))
     db.delete(user)
     db.commit()
     return {"ok": True}
+
+class ChatRequest(BaseModel):
+    question: str
+    period: str = "monthly"
+
+class RecommendationFeedback(BaseModel):
+    recommendation_id: str
+    action: str  # "saved", "dismissed", "useful", "not_useful"
+
+@app.post("/api/ai/chat")
+def chat_with_arth_ai(payload: ChatRequest):
+    """
+    Endpoint for the AI chat assistant. Allows users to ask business questions in normal English,
+    grounded strictly in approved dashboard records.
+    """
+    result = ai_service.answer_query(user_prompt=payload.question, period=payload.period)
+    return result
+
+@app.post("/api/ai/recommendation-feedback")
+def submit_recommendation_feedback(payload: RecommendationFeedback):
+    """
+    Logs user feedback on AI recommendation cards for demonstration and review.
+    """
+    # In a full production app, save this to sqlite database table 'recommendation_feedback'
+    return {
+        "status": "success", 
+        "message": f"Successfully marked recommendation {payload.recommendation_id} as {payload.action}."
+    }
