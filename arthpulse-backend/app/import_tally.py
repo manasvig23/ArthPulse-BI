@@ -523,7 +523,6 @@ def load_synthetic_bundle(db, folder):
     apply_party_geo(db)
     compute_segments(db)
     compute_movement(db)
-    db.commit()
     return counts
 
 

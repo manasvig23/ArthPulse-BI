@@ -1,4 +1,14 @@
 import { useMemo, useState } from "react";
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  CartesianGrid,
+} from "recharts";
+
 import Kpi, { KpiGrid } from "../components/Kpi.jsx";
 import PageHeading from "../components/PageHeading.jsx";
 import DataTable from "../components/DataTable.jsx";
@@ -10,7 +20,11 @@ const columns = [
   { header: "Product", cell: r => <b>{r[1]}</b> },
   { header: "Category", cell: r => r[2] },
   { header: "Branch / Godown", cell: r => r[3] },
-  { header: "Quantity", cell: r => r[4], className: r => (r[4] < 0 ? "negative" : "") },
+  {
+    header: "Quantity",
+    cell: r => r[4],
+    className: r => (r[4] < 0 ? "negative" : ""),
+  },
   { header: "Value", cell: r => formatMoney(r[5]) },
   { header: "Movement", cell: r => <StatusBadge value={r[6]} /> },
   { header: "Risk", cell: r => <StatusBadge value={r[7]} /> },
@@ -18,22 +32,69 @@ const columns = [
 
 export default function Inventory({ data, notify }) {
   const i = data.summary.inventory;
+
   const [stockState, setStockState] = useState("all");
+  const [selectedMovement, setSelectedMovement] = useState(null);
 
   const movement = useMemo(() => {
     const counts = {};
-    data.inventory.forEach(r => { counts[r[6]] = (counts[r[6]] || 0) + 1; });
+
+    data.inventory.forEach(r => {
+      counts[r[6]] = (counts[r[6]] || 0) + 1;
+    });
+
     return counts;
   }, [data.inventory]);
 
-  const rows = useMemo(() => data.inventory.filter(r => {
-    const healthy = r[7].toLowerCase().includes("healthy");
-    return stockState === "all" || (stockState === "risk" ? !healthy : healthy);
-  }), [data.inventory, stockState]);
+  const movementData = useMemo(
+    () =>
+      Object.entries(movement).map(([name, count]) => ({
+        name,
+        count,
+      })),
+    [movement]
+  );
+
+  const rows = useMemo(
+    () =>
+      data.inventory.filter(r => {
+        const healthy = r[7].toLowerCase().includes("healthy");
+
+        const matchesStockState =
+          stockState === "all" ||
+          (stockState === "risk" && !healthy) ||
+          (stockState === "healthy" && healthy);
+
+        const matchesMovement =
+          selectedMovement === null || r[6] === selectedMovement;
+
+        return matchesStockState && matchesMovement;
+      }),
+    [data.inventory, stockState, selectedMovement]
+  );
 
   const exportCsv = () => {
-    downloadCsv("inventory", [["SKU", "Product", "Category", "Location", "Quantity", "Value", "Movement", "Risk"], ...data.inventory]);
+    downloadCsv("inventory", [
+      [
+        "SKU",
+        "Product",
+        "Category",
+        "Location",
+        "Quantity",
+        "Value",
+        "Movement",
+        "Risk",
+      ],
+      ...data.inventory,
+    ]);
+
     notify("inventory CSV downloaded.");
+  };
+
+  const handleMovementClick = name => {
+    setSelectedMovement(current =>
+      current === name ? null : name
+    );
   };
 
   return (
@@ -43,30 +104,125 @@ export default function Inventory({ data, notify }) {
         title="Inventory dashboard"
         subtext="Availability, value, movement, turnover and stock risk across locations."
       >
-        <button className="primary-button" onClick={exportCsv}>⇩ Export inventory CSV</button>
+        <button className="primary-button" onClick={exportCsv}>
+          ⇩ Export inventory CSV
+        </button>
       </PageHeading>
 
       <KpiGrid>
-        <Kpi label="STOCK VALUE" value={formatMoney(i.stock_value)} detail="Across all branches and godowns" />
-        <Kpi label="LOW-STOCK RISKS" value={i.low_stock} detail="Reorder required" tone="warning" />
-        <Kpi label="NEGATIVE STOCK" value={i.negative} detail="Immediate stock correction" tone="negative" />
-        <Kpi label="OVERSTOCK VALUE" value={formatMoney(i.overstock_value)} detail="Well above reorder level" tone="warning" />
+        <Kpi
+          label="STOCK VALUE"
+          value={formatMoney(i.stock_value)}
+          detail="Across all branches and godowns"
+        />
+
+        <Kpi
+          label="LOW-STOCK RISKS"
+          value={i.low_stock}
+          detail="Reorder required"
+          tone="warning"
+        />
+
+        <Kpi
+          label="NEGATIVE STOCK"
+          value={i.negative}
+          detail="Immediate stock correction"
+          tone="negative"
+        />
+
+        <Kpi
+          label="OVERSTOCK VALUE"
+          value={formatMoney(i.overstock_value)}
+          detail="Well above reorder level"
+          tone="warning"
+        />
       </KpiGrid>
 
       <div className="two-col">
         <article className="card">
-          <p className="card-label">MOVEMENT CLASSIFICATION</p><h2>Fast, slow and non-moving</h2>
+          <p className="card-label">MOVEMENT CLASSIFICATION</p>
+          <h2>Fast, slow and non-moving</h2>
+
           <div className="segment-grid">
             {Object.entries(movement).map(([name, value]) => (
-              <div key={name}><strong>{value}</strong><span>{name}</span></div>
+              <button
+                key={name}
+                type="button"
+                className="movement-segment"
+                aria-pressed={selectedMovement === name}
+                onClick={() => handleMovementClick(name)}
+              >
+                <strong>{value}</strong>
+                <span>{name}</span>
+              </button>
             ))}
           </div>
+
+          <div className="chart-box">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart
+                data={movementData}
+                margin={{
+                  top: 8,
+                  right: 12,
+                  left: 0,
+                  bottom: 4,
+                }}
+              >
+                <CartesianGrid strokeDasharray="3 3" />
+
+                <XAxis dataKey="name" />
+
+                <YAxis allowDecimals={false} />
+
+                <Tooltip />
+
+                <Bar
+                  dataKey="count"
+                  name="Products"
+                  fill="var(--accent)"
+                  radius={[4, 4, 0, 0]}
+                  cursor="pointer"
+                  onClick={entry => {
+                    if (entry?.name) {
+                      handleMovementClick(entry.name);
+                    }
+                  }}
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+
+          {selectedMovement !== null && (
+            <p className="chart-selection">
+              Selected classification:{" "}
+              <strong>{selectedMovement}</strong>
+              {" — "}
+              {movement[selectedMovement]} products
+            </p>
+          )}
+
+          {selectedMovement !== null && (
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => setSelectedMovement(null)}
+            >
+              Clear movement filter
+            </button>
+          )}
         </article>
+
         <article className="card">
-          <p className="card-label">INVENTORY EFFICIENCY</p><h2>Turnover and days of inventory</h2>
+          <p className="card-label">INVENTORY EFFICIENCY</p>
+          <h2>Turnover and days of inventory</h2>
+
           <div className="compact-list">
             {i.efficiency.map(item => (
-              <div key={item[0]}><span>{item[0]}</span><b>{item[1]}</b></div>
+              <div key={item[0]}>
+                <span>{item[0]}</span>
+                <b>{item[1]}</b>
+              </div>
             ))}
           </div>
         </article>
@@ -79,7 +235,10 @@ export default function Inventory({ data, notify }) {
         rows={rows}
         placeholder="Search SKU, product or branch"
         extra={
-          <select value={stockState} onChange={e => setStockState(e.target.value)}>
+          <select
+            value={stockState}
+            onChange={e => setStockState(e.target.value)}
+          >
             <option value="all">All stock states</option>
             <option value="risk">At risk</option>
             <option value="healthy">Healthy</option>

@@ -1,38 +1,51 @@
-"""Load TallyPrime Educational company data, or reload the synthetic presentation set."""
+"""Load TallyPrime data or reload the synthetic presentation dataset."""
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta
 from pathlib import Path
+import math
 
 from sqlalchemy.orm import Session
 
 from . import tally_xml
 from .database import Base, engine
 from .import_tally import compute_movement, compute_segments, load_synthetic_bundle
-from .models import (
-    InventoryItem, PartyMaster, SalesTarget, StockMovement, SyncEvent, Voucher,
-)
+from .models import InventoryItem, SyncEvent, Voucher
 from .rules import REFERENCE_DATE
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 SYNTHETIC_DIR = BACKEND_DIR / "synthetic_data"
-KEEP_TABLES = {"users"}
+
+# These tables must survive a normal data replacement.
+KEEP_TABLES = {"users", "sync_events"}
+
+# GST reconciliation data is maintained separately from the Tally voucher import.
+TAX_TABLES = {"gstr2b_invoices", "gst_returns", "supplier_profiles"}
 
 
-def _wipe_operational(db: Session, keep_tax=False):
-    tables = [t for t in reversed(Base.metadata.sorted_tables)
-              if t.name not in KEEP_TABLES and not (keep_tax and t.name in {"gstr2b_invoices", "gst_returns", "supplier_profiles"})]
-    for t in tables:
-        db.execute(t.delete())
-    db.commit()
+def _wipe_operational(db: Session, keep_tax: bool = False) -> None:
+    """Delete replaceable operational rows inside the current transaction.
+
+    Do not commit here. The caller must commit only after the replacement
+    data has been inserted successfully.
+    """
+    tables = [
+        table
+        for table in reversed(Base.metadata.sorted_tables)
+        if table.name not in KEEP_TABLES
+        and not (keep_tax and table.name in TAX_TABLES)
+    ]
+
+    for table in tables:
+        db.execute(table.delete())
 
 
 def last_sync(db: Session) -> dict | None:
     row = db.query(SyncEvent).order_by(SyncEvent.id.desc()).first()
     if not row:
         return None
+
     return {
         "id": row.id,
         "started_at": row.started_at.isoformat() if row.started_at else None,
@@ -46,149 +59,288 @@ def last_sync(db: Session) -> dict | None:
         "stock_count": row.stock_count,
         "tally_sales_total": row.tally_sales_total,
         "dashboard_sales_total": row.dashboard_sales_total,
-        "stale": bool(row.finished_at and datetime.utcnow() - row.finished_at > timedelta(hours=24)),
+        "stale": bool(
+            row.finished_at
+            and datetime.utcnow() - row.finished_at > timedelta(hours=24)
+        ),
     }
 
 
-def _log(db, **kwargs) -> SyncEvent:
-    ev = SyncEvent(**kwargs)
-    db.add(ev)
+def _log(db: Session, **kwargs) -> SyncEvent:
+    event = SyncEvent(**kwargs)
+    db.add(event)
     db.commit()
-    db.refresh(ev)
-    return ev
+    db.refresh(event)
+    return event
 
 
 def reload_synthetic(db: Session) -> dict:
+    """Replace operational data with the full synthetic presentation dataset."""
     started = datetime.utcnow()
-    ev = _log(db, started_at=started, source="synthetic", status="running",
-              message="Loading presentation synthetic registers", company="ArthPulse synthetic")
+    event = _log(
+        db,
+        started_at=started,
+        source="synthetic",
+        status="running",
+        message="Loading presentation synthetic registers",
+        company="ArthPulse synthetic",
+    )
+
     try:
-        data_tables = [t for t in Base.metadata.sorted_tables if t.name != "users"]
-        Base.metadata.drop_all(bind=engine, tables=data_tables)
-        Base.metadata.create_all(bind=engine)
+        # Preserve both login accounts and the history of sync attempts.
+        _wipe_operational(db, keep_tax=False)
+
         counts = load_synthetic_bundle(db, SYNTHETIC_DIR)
-        sales_total = sum(v.amount for v in db.query(Voucher).filter(Voucher.voucher_type == "Sales").all())
-        ev.status = "success"
-        ev.finished_at = datetime.utcnow()
-        ev.message = "Synthetic Tally-shaped registers loaded for the presentation."
-        ev.sales_count = counts.get("sales", 0)
-        ev.purchase_count = counts.get("purchases", 0)
-        ev.stock_count = counts.get("stock", 0)
-        ev.dashboard_sales_total = sales_total
-        ev.tally_sales_total = sales_total
+
+        sales_total = sum(
+            voucher.amount
+            for voucher in db.query(Voucher)
+            .filter(Voucher.voucher_type == "Sales")
+            .all()
+        )
+
+        event.status = "success"
+        event.finished_at = datetime.utcnow()
+        event.message = "Synthetic Tally-shaped registers loaded for the presentation."
+        event.sales_count = counts.get("sales", 0)
+        event.purchase_count = counts.get("purchases", 0)
+        event.stock_count = counts.get("stock", 0)
+        event.dashboard_sales_total = sales_total
+        event.tally_sales_total = sales_total
+
         db.commit()
         return last_sync(db)
-    except Exception as e:
-        ev.status = "error"
-        ev.finished_at = datetime.utcnow()
-        ev.message = str(e)
+
+    except Exception as exc:
+        db.rollback()
+        db.refresh(event)
+        event.status = "error"
+        event.finished_at = datetime.utcnow()
+        event.message = str(exc)[:1000]
         db.commit()
         raise
 
 
 def _nature_from_narration(text: str) -> str | None:
-    t = (text or "").lower()
-    if "contractor" in t:
+    text = (text or "").lower()
+
+    if "contractor" in text:
         return "Contractor"
-    if "professional" in t:
+    if "professional" in text:
         return "Professional"
-    if "rent" in t:
+    if "rent" in text:
         return "Rent-Building"
-    if "commission" in t:
+    if "commission" in text:
         return "Commission"
+
     return None
 
 
-def apply_tally_rows(db: Session, vouchers: list[dict], stock: list[dict], company: str) -> dict:
-    """Replace operational vouchers/stock with Tally export; keep GST/supplier tables."""
-    _wipe_operational(db, keep_tax=True)
-    sales_n = purch_n = pay_n = 0
-    tally_sales = 0.0
+def _validated_vouchers(vouchers: list[dict]) -> list[dict]:
+    """Keep only usable supported vouchers; reject an empty import."""
+    valid = []
+    supported_types = {"Sales", "Purchase", "Receipt", "Payment"}
+
     for row in vouchers:
-        if not row.get("date") or not row.get("amount"):
+        if not isinstance(row, dict):
             continue
+
+        day = row.get("date")
+        kind = row.get("voucher_type")
+        party = str(row.get("party") or "").strip()
+
+        try:
+            amount = float(row.get("amount", 0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+
+        if (
+            day is None
+            or kind not in supported_types
+            or not party
+            or not math.isfinite(amount)
+            or amount <= 0
+        ):
+            continue
+
+        valid.append({**row, "party": party, "amount": amount})
+
+    if not valid:
+        raise RuntimeError(
+            "Tally returned no usable vouchers. Existing dashboard data was "
+            "preserved. Check the selected company, date range, and voucher export."
+        )
+
+    return valid
+
+
+def apply_tally_rows(
+    db: Session,
+    vouchers: list[dict],
+    stock: list[dict],
+    company: str,
+) -> dict:
+    """Replace operational voucher/stock data in the current transaction.
+
+    This function intentionally does not commit. The caller commits the
+    imported rows and successful sync event together.
+    """
+    vouchers = _validated_vouchers(vouchers)
+
+    clean_stock = []
+    for row in stock:
+        if not isinstance(row, dict):
+            continue
+
+        product = str(row.get("product") or "").strip()
+        if not product:
+            continue
+
+        try:
+            quantity = float(row.get("quantity") or 0)
+            value = float(row.get("value") or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+
+        if not math.isfinite(quantity) or not math.isfinite(value):
+            continue
+
+        clean_stock.append({
+            **row,
+            "product": product,
+            "quantity": quantity,
+            "value": value,
+        })
+
+    # Validation is complete before the existing operational rows are touched.
+    _wipe_operational(db, keep_tax=True)
+
+    sales_count = 0
+    purchase_count = 0
+    payment_count = 0
+    tally_sales_total = 0.0
+
+    for row in vouchers:
         kind = row["voucher_type"]
+        day = row["date"]
+        amount = row["amount"]
+        narration = row.get("narration") or ""
+
         pending = "Pending"
-        due = row["date"] + timedelta(days=30)
-        if due < REFERENCE_DATE:
+        due_date = day + timedelta(days=30)
+
+        if due_date < REFERENCE_DATE:
             pending = "Overdue"
-        elif due <= REFERENCE_DATE + timedelta(days=7):
+        elif due_date <= REFERENCE_DATE + timedelta(days=7):
             pending = "Due this week"
-        cash = row.get("mode") == "Cash" or "cash" in (row.get("narration") or "").lower()
-        v = Voucher(
-            voucher_date=row["date"],
+
+        cash = (
+            row.get("mode") == "Cash"
+            or "cash" in narration.lower()
+        )
+
+        voucher = Voucher(
+            voucher_date=day,
             voucher_type=kind,
             party_name=row["party"],
             product=row.get("product") or "Unspecified",
-            amount=row["amount"],
+            amount=amount,
             quantity=row.get("quantity") or 0,
             invoice_no=row.get("invoice"),
             gstin=row.get("gstin") or None,
             tally_guid=row.get("guid"),
             payment_mode="Cash" if cash else "Bank",
-            nature=_nature_from_narration(row.get("narration")),
+            nature=_nature_from_narration(narration),
         )
-        if kind == "Sales":
-            sales_n += 1
-            tally_sales += row["amount"]
-            v.segment = "Active"
-        elif kind == "Purchase":
-            purch_n += 1
-            v.received_quantity = v.quantity
-            v.status = "Received"
-            v.po_number = row.get("invoice") or f"PO-{purch_n}"
-        elif kind == "Receipt":
-            pay_n += 1
-            v.payment_type = "Receivable"
-            v.due_date = due
-            v.status = "Cleared" if cash else pending
-        elif kind == "Payment":
-            pay_n += 1
-            v.payment_type = "Payable"
-            v.due_date = due
-            # MSME planted bill stays open so 43B(h) still fires
-            if "pending" in (row.get("narration") or "").lower() or "msme" in (row.get("narration") or "").lower():
-                v.status = pending
-            else:
-                v.status = "Cleared" if cash else pending
-        db.add(v)
 
-    stock_n = 0
-    for i, row in enumerate(stock, 1):
-        if not row.get("product"):
-            continue
-        db.add(InventoryItem(
-            sku=f"TLY-{i:04d}",
-            product=row["product"],
-            category=row.get("category") or "Unassigned",
-            branch="Main",
-            quantity=row.get("quantity") or 0,
-            value=row.get("value") or 0,
-            movement="Unclassified",
-            reorder_level=20,
-        ))
-        stock_n += 1
+        if kind == "Sales":
+            sales_count += 1
+            tally_sales_total += amount
+            voucher.segment = "Active"
+
+        elif kind == "Purchase":
+            purchase_count += 1
+            voucher.received_quantity = voucher.quantity
+            voucher.status = "Received"
+            voucher.po_number = row.get("invoice") or f"PO-{purchase_count}"
+
+        elif kind == "Receipt":
+            payment_count += 1
+            voucher.payment_type = "Receivable"
+            voucher.due_date = due_date
+            voucher.status = "Cleared" if cash else pending
+
+        elif kind == "Payment":
+            payment_count += 1
+            voucher.payment_type = "Payable"
+            voucher.due_date = due_date
+
+            # Preserve the intentionally open MSME bill used by the demo.
+            if "pending" in narration.lower() or "msme" in narration.lower():
+                voucher.status = pending
+            else:
+                voucher.status = "Cleared" if cash else pending
+
+        db.add(voucher)
+
+    for index, row in enumerate(clean_stock, start=1):
+        db.add(
+            InventoryItem(
+                sku=f"TLY-{index:04d}",
+                product=row["product"],
+                category=row.get("category") or "Unassigned",
+                branch="Main",
+                quantity=row["quantity"],
+                value=row["value"],
+                movement="Unclassified",
+                reorder_level=20,
+            )
+        )
+
+    # Make inserted rows visible to the derived calculations.
     db.flush()
     compute_segments(db)
     compute_movement(db)
-    db.commit()
-    dash_sales = sum(v.amount for v in db.query(Voucher).filter(Voucher.voucher_type == "Sales").all())
+    db.flush()
+
+    dashboard_sales_total = sum(
+        voucher.amount
+        for voucher in db.query(Voucher)
+        .filter(Voucher.voucher_type == "Sales")
+        .all()
+    )
+
     return {
-        "sales": sales_n, "purchases": purch_n, "payments": pay_n, "stock": stock_n,
-        "tally_sales_total": tally_sales, "dashboard_sales_total": dash_sales,
+        "sales": sales_count,
+        "purchases": purchase_count,
+        "payments": payment_count,
+        "stock": len(clean_stock),
+        "tally_sales_total": tally_sales_total,
+        "dashboard_sales_total": dashboard_sales_total,
         "company": company,
     }
 
 
 def sync_from_tally(db: Session, company: str | None = None) -> dict:
+    """Fetch Tally data and replace operational data only after validation."""
     started = datetime.utcnow()
-    ok, ping_msg = tally_xml.ping()
+
+    ok, ping_message = tally_xml.ping()
     if not ok:
-        _log(db, started_at=started, finished_at=datetime.utcnow(), source="tally",
-             status="error", company=company or tally_xml.TALLY_COMPANY or None,
-             message="Could not reach TallyPrime at "
-                     f"{tally_xml.TALLY_URL}. Open the demo company, enable XML "
-                     f"requests (port 9000), then try again. Detail: {ping_msg[:240]}")
+        message = (
+            f"Could not reach TallyPrime at {tally_xml.TALLY_URL}. "
+            "Open the intended company and enable XML requests on port 9000. "
+            f"Detail: {ping_message[:240]}"
+        )
+        _log(
+            db,
+            started_at=started,
+            finished_at=datetime.utcnow(),
+            source="tally",
+            status="error",
+            company=company or tally_xml.TALLY_COMPANY or None,
+            message=message,
+        )
         raise RuntimeError(
             f"TallyPrime is not reachable at {tally_xml.TALLY_URL}. "
             "Start Tally, open the demo company, and enable XML/ODBC on port 9000."
@@ -198,80 +350,138 @@ def sync_from_tally(db: Session, company: str | None = None) -> dict:
     try:
         companies = tally_xml.list_companies()
     except Exception:
+        # Some Tally setups do not expose the custom company-list report.
+        # Continue using the configured/current company as before.
         companies = []
-    chosen = company or tally_xml.TALLY_COMPANY or (companies[0] if companies else "")
-    ev = _log(db, started_at=started, source="tally", status="running",
-              company=chosen or None, message="Exporting vouchers from TallyPrime")
+
+    chosen_company = (
+        company
+        or tally_xml.TALLY_COMPANY
+        or (companies[0] if companies else "")
+    )
+
+    event = _log(
+        db,
+        started_at=started,
+        source="tally",
+        status="running",
+        company=chosen_company or None,
+        message="Exporting vouchers from TallyPrime",
+    )
 
     try:
-        raw_v = tally_xml.export_vouchers(chosen or None)
-        raw_s = tally_xml.export_stock(chosen or None)
-        vouchers = tally_xml.parse_vouchers(raw_v)
-        stock = tally_xml.parse_stock(raw_s)
-        if not vouchers:
-            raise RuntimeError(
-                "Tally responded but no vouchers were read. Confirm the Educational "
-                "demo company is open and contains the ArthPulse import "
-                "(dates 1, 2 and 31 only)."
-            )
-        counts = apply_tally_rows(db, vouchers, stock, chosen)
-        ev.status = "success"
-        ev.finished_at = datetime.utcnow()
-        ev.message = (
-            f"Fetched {counts['sales']} sales, {counts['purchases']} purchases and "
-            f"{counts['stock']} stock items from TallyPrime"
-            + (f" company '{chosen}'." if chosen else ".")
+        raw_vouchers = tally_xml.export_vouchers(chosen_company or None)
+        raw_stock = tally_xml.export_stock(chosen_company or None)
+
+        vouchers = tally_xml.parse_vouchers(raw_vouchers)
+        stock = tally_xml.parse_stock(raw_stock)
+
+        # Fail before replacing anything if the voucher response is unusable.
+        vouchers = _validated_vouchers(vouchers)
+
+        counts = apply_tally_rows(
+            db,
+            vouchers,
+            stock,
+            chosen_company,
         )
-        ev.sales_count = counts["sales"]
-        ev.purchase_count = counts["purchases"]
-        ev.stock_count = counts["stock"]
-        ev.tally_sales_total = counts["tally_sales_total"]
-        ev.dashboard_sales_total = counts["dashboard_sales_total"]
+
+        event.status = "success"
+        event.finished_at = datetime.utcnow()
+        event.message = (
+            f"Fetched {counts['sales']} sales, "
+            f"{counts['purchases']} purchases and "
+            f"{counts['stock']} stock items from TallyPrime"
+            + (
+                f" company '{chosen_company}'."
+                if chosen_company
+                else "."
+            )
+        )
+        event.sales_count = counts["sales"]
+        event.purchase_count = counts["purchases"]
+        event.stock_count = counts["stock"]
+        event.tally_sales_total = counts["tally_sales_total"]
+        event.dashboard_sales_total = counts["dashboard_sales_total"]
+
+        # Commit the replacement and its success record together.
         db.commit()
-        info = last_sync(db)
+
+        info = last_sync(db) or {}
         info["companies"] = companies
         return info
-    except Exception as e:
-        ev.status = "error"
-        ev.finished_at = datetime.utcnow()
-        ev.message = str(e)
+
+    except Exception as exc:
+        # Roll back operational deletes/inserts so previous dashboard data
+        # remains intact if any part of the replacement fails.
+        db.rollback()
+        db.refresh(event)
+
+        event.status = "error"
+        event.finished_at = datetime.utcnow()
+        event.message = str(exc)[:1000]
         db.commit()
         raise
 
 
 def push_educational_to_tally(company: str | None = None) -> dict:
     """Insert the Educational-date subset into the open Tally company."""
-    ok, msg = tally_xml.ping()
+    ok, message = tally_xml.ping()
     if not ok:
-        raise RuntimeError(f"TallyPrime is not reachable at {tally_xml.TALLY_URL}: {msg[:240]}")
-    xml = tally_xml.build_educational_import(company or tally_xml.TALLY_COMPANY)
+        raise RuntimeError(
+            f"TallyPrime is not reachable at {tally_xml.TALLY_URL}: "
+            f"{message[:240]}"
+        )
+
+    xml = tally_xml.build_educational_import(
+        company or tally_xml.TALLY_COMPANY
+    )
     response = tally_xml.post_xml(xml)
+
     path = SYNTHETIC_DIR / "tally_educational_import.xml"
     tally_xml.write_educational_file(str(path))
-    created = "created" in response.lower() or "success" in response.lower() or "<status>1</status>" in response.lower()
+
+    response_lower = response.lower()
+    looks_ok = (
+        "created" in response_lower
+        or "success" in response_lower
+        or "<status>1</status>" in response_lower
+    ) and "error" not in response_lower
+
     return {
-        "ok": True,
-        "message": "Educational vouchers (dates 1, 2 and 31) sent to TallyPrime. "
-                   "If ledgers already existed, duplicates may have been ignored.",
+        "ok": looks_ok,
+        "message": (
+            "Educational-date data was sent to TallyPrime. Review the Tally "
+            "response before syncing it back into ArthPulse."
+            if looks_ok
+            else "TallyPrime responded, but the import response does not confirm "
+                 "success. Review the response excerpt before syncing."
+        ),
         "file": str(path),
         "tally_response_excerpt": response[:800],
-        "looks_ok": created or "error" not in response.lower(),
+        "looks_ok": looks_ok,
     }
 
 
 def tally_status() -> dict:
-    ok, msg = tally_xml.ping()
+    """Return gateway reachability, configured company, and recent sync status."""
+    ok, message = tally_xml.ping()
     companies = []
+
     if ok:
         try:
             companies = tally_xml.list_companies()
         except Exception:
             companies = []
+
     return {
         "reachable": ok,
         "url": tally_xml.TALLY_URL,
         "configured_company": tally_xml.TALLY_COMPANY or None,
         "companies": companies,
-        "detail": None if ok else msg[:400],
-        "educational_note": "TallyPrime Educational accepts voucher dates on the 1st, 2nd and 31st only.",
+        "detail": None if ok else message[:400],
+        "educational_note": (
+            "TallyPrime Educational accepts voucher dates on the 1st, 2nd "
+            "and 31st only."
+        ),
     }

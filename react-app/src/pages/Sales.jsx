@@ -19,7 +19,7 @@ const columns = [
 export default function Sales({ data, notify }) {
   const s = data.summary.sales;
   const trend = s.trend;
-
+  const explanation = data.explainability;
   const exportCsv = () => {
     downloadCsv("sales", [["Customer", "Product", "Territory", "Salesperson", "Sales", "Returns", "Segment"], ...data.sales]);
     notify("sales CSV downloaded.");
@@ -84,6 +84,83 @@ export default function Sales({ data, notify }) {
           </div>
         </article>
       </div>
+
+      <article className="card">
+  <div className="card-header">
+    <div>
+      <p className="card-label">AI / EXPLAINABILITY</p>
+      <h2>What influences sales?</h2>
+    </div>
+    <span className="subtext">
+      {explanation?.method === "none"
+        ? "Insufficient data"
+        : explanation?.method?.startsWith("SHAP")
+          ? "SHAP analysis"
+          : explanation?.method
+            ? "Fallback analysis"
+            : "Loading analysis"}
+    </span>
+  </div>
+
+  {!explanation ? (
+    <p className="empty">Sales-driver analysis is not available yet.</p>
+  ) : explanation.drivers?.length > 0 ? (
+    <>
+      <p className="subtext">{explanation.plain_english}</p>
+
+      <div className="compact-list">
+        {explanation.drivers.map((driver, index) => (
+          <div key={`${driver.factor}-${index}`}>
+            <span>
+              <strong>{driver.factor}</strong>
+              <br />
+              <small>Relative importance score</small>
+            </span>
+            <div style={{ minWidth: 110, textAlign: "right" }}>
+  <b>{Number(driver.impact_score).toFixed(3)}</b>
+  <div
+    style={{
+      width: 110,
+      height: 5,
+      marginTop: 6,
+      background: "var(--border, #e5e7eb)",
+      borderRadius: 10,
+      overflow: "hidden",
+    }}
+  >
+    <div
+      style={{
+        height: "100%",
+        width: `${Math.max(
+          0,
+          Math.min(100, Number(driver.impact_score) * 100)
+        )}%`,
+        background: "var(--accent, #64748b)",
+        borderRadius: 10,
+      }}
+    />
+    </div>
+  </div>
+          </div>
+        ))}
+      </div>
+
+      <p className="subtext" style={{ marginTop: 14 }}>
+        Method: {explanation.method}
+        {explanation.as_of && ` · Data through ${explanation.as_of}`}
+      </p>
+      <p className="subtext">
+        These scores indicate model importance, not whether a factor
+        increases or decreases sales. Associations do not establish causation.
+      </p>
+    </>
+  ) : (
+    <p className="empty">
+      {explanation.plain_english ||
+        "There is not enough sales data to identify reliable drivers for this period."}
+    </p>
+  )}
+</article>
 
       <DataTable
         label="CUSTOMER & PRODUCT ANALYSIS"

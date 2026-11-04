@@ -258,3 +258,110 @@ body.dark .signout-button:hover{background:#3a1f1f}
 .modal-actions .secondary-button{padding:11px 18px;font-size:13px}
 .danger-button{padding:11px 18px;border-radius:12px;background:#c0443f;color:#fff;font-size:13px;font-weight:700}
 .danger-button:hover{background:#a8372f}
+
+/* Interactive Recharts legends and selections */
+.interactive-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 10px 8px 2px;
+}
+
+.interactive-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+
+.interactive-legend-item:hover {
+  border-color: var(--line);
+}
+
+.interactive-legend-item:focus-visible {
+  outline: 2px solid var(--muted);
+  outline-offset: 2px;
+}
+
+.interactive-legend-item.is-hidden {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.legend-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  flex: 0 0 10px;
+  border-radius: 3px;
+}
+
+.chart-selection {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.chart-selection-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 5px;
+  color: var(--muted);
+}
+
+.chart-selection .ghost-button {
+  flex-shrink: 0;
+}
+
+@media (max-width: 480px) {
+  .chart-selection {
+    flex-direction: column;
+  }
+
+  .interactive-chart-legend {
+    gap: 6px;
+  }
+}
+
+.movement-segment {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: inherit;
+}
+
+.movement-segment:hover,
+.movement-segment[aria-pressed="true"] {
+  border-color: var(--accent);
+}
+
+.movement-segment:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.chart-selection {
+  margin-top: 12px;
+  font-size: 0.9rem;
+}

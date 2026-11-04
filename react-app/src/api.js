@@ -108,6 +108,7 @@ export function useDashboardData(period, areas, onAuthError) {
       recommendations: "/api/recommendations",
       quality: "/api/quality",
       forecasts: "/api/forecasts",
+      explainability: has("sales") && `/api/explainability${q}`,
       sync: "/api/sync/status",
     };
     const keys = Object.keys(plan).filter(k => plan[k]);
@@ -121,7 +122,7 @@ export function useDashboardData(period, areas, onAuthError) {
         const next = {
           sales: [], purchases: [], inventory: [], payments: [], alerts: [],
           compliance: null, summary: null, recommendations: [], quality: null,
-          forecasts: null, sync: null,
+          forecasts: null, explainability: null, sync: null,
         };
         keys.forEach((k, i) => { next[k] = results[i]; });
         setData(next);
