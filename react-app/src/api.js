@@ -33,6 +33,20 @@ async function request(path) {
 
 export const getJson = path => request(path);
 
+export async function downloadBinary(path, filename) {
+  const token = getToken();
+  const response = await fetch(`${API_BASE}${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!response.ok) throw new Error(`Download failed (${response.status})`);
+  const blob = await response.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
 export async function login(username, password) {
   const response = await fetch(`${API_BASE}/api/auth/login`, {
     method: "POST",
@@ -91,6 +105,10 @@ export function useDashboardData(period, areas, onAuthError) {
       alerts: has("alerts") && "/api/alerts",
       compliance: has("compliance") && "/api/compliance",
       summary: `/api/summary${q}`,
+      recommendations: "/api/recommendations",
+      quality: "/api/quality",
+      forecasts: "/api/forecasts",
+      sync: "/api/sync/status",
     };
     const keys = Object.keys(plan).filter(k => plan[k]);
 
@@ -100,7 +118,11 @@ export function useDashboardData(period, areas, onAuthError) {
     Promise.all(keys.map(k => getJson(plan[k])))
       .then(results => {
         if (cancelled) return;
-        const next = { sales: [], purchases: [], inventory: [], payments: [], alerts: [], compliance: null, summary: null };
+        const next = {
+          sales: [], purchases: [], inventory: [], payments: [], alerts: [],
+          compliance: null, summary: null, recommendations: [], quality: null,
+          forecasts: null, sync: null,
+        };
         keys.forEach((k, i) => { next[k] = results[i]; });
         setData(next);
         setLoading(false);

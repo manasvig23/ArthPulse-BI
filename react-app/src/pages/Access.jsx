@@ -17,9 +17,13 @@ export default function Access({ user, notify, onUserChanged }) {
   const [newPassword, setNewPassword] = useState("");
   const [roleFor, setRoleFor] = useState(null);
   const [newRole, setNewRole] = useState("");
+  const [sync, setSync] = useState(null);
 
   const load = useCallback(
-    () => getJson("/api/auth/roles").then(setInfo).catch(err => setLoadError(err.message)), []);
+    () => {
+      getJson("/api/auth/roles").then(setInfo).catch(err => setLoadError(err.message));
+      getJson("/api/sync/status").then(setSync).catch(() => {});
+    }, []);
   useEffect(() => { load(); }, [load]);
 
   const roleName = r => ROLE_NAMES[r.id] || r.label;
@@ -89,6 +93,39 @@ export default function Access({ user, notify, onUserChanged }) {
 
       {info && (
         <>
+          <article className="card" style={{ marginBottom: 18 }}>
+            <p className="card-label">TALLYPRIME</p>
+            <h2>Demo company sync</h2>
+            <p className="subtext">
+              Presentation data is the full synthetic set. TallyPrime Educational only allows voucher dates
+              1, 2 and 31 — push that subset into your open demo company, then click Sync TallyPrime.
+            </p>
+            {sync && (
+              <ul className="note-list">
+                <li>Gateway {sync.url}: {sync.reachable ? "reachable" : "not running"}</li>
+                <li>Last sync: {sync.last ? `${sync.last.source} · ${sync.last.status} · ${sync.last.finished_at || sync.last.message}` : "never"}</li>
+                <li>{sync.educational_note}</li>
+                {sync.companies?.length > 0 && <li>Companies Tally reported: {sync.companies.join(", ")}</li>}
+              </ul>
+            )}
+            <div className="report-actions" style={{ marginTop: 12 }}>
+              <button className="secondary-button" disabled={busy} onClick={() => act(
+                () => sendJson("POST", "/api/sync/push-educational", {}),
+                "Educational vouchers sent to the open Tally company (dates 1, 2, 31)."
+              )}>Push educational data into Tally</button>
+              <button className="primary-button" disabled={busy} onClick={async () => {
+                const ok = await act(() => sendJson("POST", "/api/sync/tally", {}),
+                  "Fetched the open TallyPrime company into ArthPulse.");
+                if (ok) window.location.reload();
+              }}>Sync TallyPrime</button>
+              <button className="secondary-button" disabled={busy} onClick={async () => {
+                const ok = await act(() => sendJson("POST", "/api/sync/synthetic", {}),
+                  "Reloaded the full synthetic presentation set.");
+                if (ok) window.location.reload();
+              }}>Reload synthetic demo</button>
+            </div>
+          </article>
+
           <article className="card" style={{ marginBottom: 18 }}>
             <p className="card-label">ADD A PERSON</p>
             <h2>New account</h2>

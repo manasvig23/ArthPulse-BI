@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getJson, getToken, setToken, useDashboardData } from "./api.js";
+import { downloadBinary, getJson, getToken, setToken, useDashboardData } from "./api.js";
 import { downloadCsv, formatMoney } from "./format.js";
 import { Icon, Logo } from "./components/Kpi.jsx";
 import Login from "./pages/Login.jsx";
@@ -205,6 +205,19 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
     notify(`${PAGES[page].label} CSV downloaded.`);
   };
 
+  const exportExcel = async () => {
+    try {
+      await downloadBinary(`/api/export/excel?period=${period}`, `arthpulse-${period}.xlsx`);
+      notify("Excel workbook downloaded.");
+    } catch (e) { notify(e.message); }
+  };
+  const exportPdf = async () => {
+    try {
+      await downloadBinary(`/api/export/pdf?period=${period}`, `arthpulse-${period}.pdf`);
+      notify("PDF report downloaded.");
+    } catch (e) { notify(e.message); }
+  };
+
   const onPeriodChange = value => {
     setPeriod(value);
     notify(`Dashboard updated for ${PERIODS.find(p => p[0] === value)[1].toLowerCase()}.`);
@@ -282,7 +295,13 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
                 {PERIODS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             )}
-            {needsData && <button className="primary-button" onClick={exportCurrent}>⇩ Export</button>}
+            {needsData && (
+              <>
+                <button className="secondary-button" onClick={exportExcel}>Excel</button>
+                <button className="secondary-button" onClick={exportPdf}>PDF</button>
+                <button className="primary-button" onClick={exportCurrent}>⇩ CSV</button>
+              </>
+            )}
             <button
               className="bell"
               aria-label={`Alerts (${alertCount})`}
@@ -308,6 +327,15 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
           <div className="default-banner">
             <span>⚠ You are still using the default administrator password. Anyone who knows it can sign in as admin.</span>
             <button className="secondary-button" onClick={() => navigate("access")}>Change it now</button>
+          </div>
+        )}
+
+        {data?.quality?.warnings?.length > 0 && (
+          <div className="default-banner">
+            <span>{data.quality.warnings[0]} Last update: {data.sync?.last?.finished_at || data.sync?.last?.started_at || "never"} ({data.sync?.last?.source || "unknown source"}).</span>
+            {allowed.includes("access") && (
+              <button className="secondary-button" onClick={() => navigate("access")}>Tally sync</button>
+            )}
           </div>
         )}
 

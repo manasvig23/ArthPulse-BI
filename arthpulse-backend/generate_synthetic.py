@@ -324,4 +324,9 @@ save(sync_status, "sync_status.xlsx")
 save(gstr2b, "gstr2b_invoices.xlsx")
 save(returns, "gst_returns.xlsx")
 
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from app.tally_xml import write_educational_file
+edu = write_educational_file(os.path.join(OUT, "tally_educational_import.xml"))
+print(f"Wrote Educational Tally import (dates 1, 2, 31 only): {edu}")
 print("\nFully corrected and reconciled synthetic dataset generated successfully in './synthetic_data/'!")

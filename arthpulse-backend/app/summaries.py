@@ -23,7 +23,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
  
 from . import rules
-from .models import Voucher, InventoryItem
+from .models import Voucher, InventoryItem, PartyMaster, SalesTarget, StockMovement
 from .rules import REFERENCE_DATE
  
 PERIOD_DAYS = {"daily": 1, "weekly": 7, "monthly": 30, "yearly": 365}
@@ -131,6 +131,54 @@ def _sales_section(sales, cur, start, end, prev_start, prev_end):
         if len(cross_sell) == 3:
             break
  
+    customer_rev = defaultdict(float)
+    product_rev = defaultdict(float)
+    group_rev = defaultdict(float)
+    city_rev = defaultdict(float)
+    state_rev = defaultdict(float)
+    pincode_rev = defaultdict(float)
+    person_rev = defaultdict(float)
+    discount_total = 0
+    pairs = defaultdict(int)
+    for v in cur:
+        net_v = _net(v)
+        customer_rev[v.party_name] += net_v
+        product_rev[v.product or "Unspecified"] += net_v
+        group_rev[v.category or "Unassigned"] += net_v
+        city_rev[v.city or "Unassigned"] += net_v
+        state_rev[v.state or "Unassigned"] += net_v
+        pincode_rev[v.pincode or "—"] += net_v
+        person_rev[v.salesperson or "Unassigned"] += net_v
+        discount_total += v.discount_amount or (v.amount * (v.discount_pct or 0) / 100)
+    def _rank(d, n=5):
+        ordered = sorted(d.items(), key=lambda kv: kv[1], reverse=True)
+        return {"top": [[k, round(v)] for k, v in ordered[:n] if v > 0],
+                "bottom": [[k, round(v)] for k, v in ordered[-n:] if v > 0 and k not in {x[0] for x in ordered[:n]}]}
+
+    # basket: products sharing a customer+date
+    basket_key = defaultdict(set)
+    for v in cur:
+        basket_key[(v.party_name, v.voucher_date)].add(v.product)
+    pair_count = defaultdict(int)
+    for items in basket_key.values():
+        items = [p for p in items if p]
+        for i, a in enumerate(sorted(items)):
+            for b in sorted(items)[i + 1:]:
+                pair_count[(a, b)] += 1
+    basket = [[a, b, n] for (a, b), n in sorted(pair_count.items(), key=lambda kv: -kv[1])[:5]]
+
+    history = []
+    for party, amt in sorted(customer_rev.items(), key=lambda kv: -kv[1])[:8]:
+        mix = defaultdict(float)
+        outstanding = 0
+        for v in sales:
+            if v.party_name == party:
+                mix[v.product or "Unspecified"] += _net(v)
+        history.append({
+            "customer": party, "period_sales": round(amt),
+            "products": [[k, round(v)] for k, v in sorted(mix.items(), key=lambda kv: -kv[1])[:4]],
+        })
+
     return {
         "gross": round(gross), "returns": round(returns), "net": round(net),
         "returns_pct": round(returns / gross * 100, 1) if gross else 0,
@@ -138,6 +186,16 @@ def _sales_section(sales, cur, start, end, prev_start, prev_end):
         "territories": {k: round(v) for k, v in territories.items() if v > 0},
         "segments": dict(segments),
         "cross_sell": cross_sell,
+        "customers": _rank(customer_rev),
+        "products": _rank(product_rev),
+        "groups": _rank(group_rev),
+        "cities": {k: round(v) for k, v in city_rev.items() if v > 0},
+        "states": {k: round(v) for k, v in state_rev.items() if v > 0},
+        "pincodes": {k: round(v) for k, v in list(pincode_rev.items())[:8] if v > 0},
+        "salespeople": {k: round(v) for k, v in person_rev.items() if v > 0},
+        "basket": basket,
+        "discount_value": round(discount_total),
+        "customer_history": history,
     }
  
  
@@ -187,6 +245,7 @@ def _purchases_section(purchases, cur, prev_start, prev_end):
         "top_share": round(top_amt / total * 100) if total else 0,
         "supplier_spend": supplier_spend,
         "price_moves": price_moves,
+        "vs_stock": None,
     }
  
  
@@ -203,7 +262,26 @@ def _inventory_section(db, sales, as_of):
     net_90 = sum(_net(v) for v in _within(sales, as_of - timedelta(days=89), as_of))
     turnover = (net_90 / stock_value) * (365 / 90) if stock_value else None
     inv_days = (stock_value / net_90 * 90) if net_90 else None
- 
+
+    godowns = defaultdict(lambda: {"qty": 0, "value": 0, "skus": 0})
+    for it in items:
+        g = godowns[it.branch or "Main"]
+        g["qty"] += it.quantity or 0
+        g["value"] += it.value or 0
+        g["skus"] += 1
+    ageing_rows = []
+    for it in items:
+        days = None
+        if it.last_movement_date:
+            days = (as_of - it.last_movement_date).days
+        ageing_rows.append([it.product, it.branch, days if days is not None else "—", it.movement, round(it.value)])
+    moves = db.query(StockMovement).order_by(StockMovement.movement_date.desc()).limit(40).all()
+    move_rows = [[m.movement_date.isoformat() if m.movement_date else "", m.voucher_type, m.product,
+                  m.godown, m.inward_qty, m.outward_qty] for m in moves]
+    high_slow = [[it.product, it.branch, round(it.value), it.movement]
+                 for it in items if it.movement in ("Slow-moving", "Non-moving") and it.value > 0]
+    high_slow.sort(key=lambda r: -r[2])
+
     return {
         "stock_value": round(stock_value), "low_stock": low, "negative": negative,
         "overstock_value": round(overstock_value),
@@ -215,6 +293,10 @@ def _inventory_section(db, sales, as_of):
             ["Slow-moving value", _money(slow)],
             ["Non-moving value", _money(non)],
         ],
+        "godowns": {k: {"qty": round(v["qty"]), "value": round(v["value"]), "skus": v["skus"]} for k, v in godowns.items()},
+        "ageing": ageing_rows[:20],
+        "movements": move_rows,
+        "high_value_slow": high_slow[:8],
     }
  
  
@@ -242,6 +324,40 @@ def _cashflow_section(db, sales, purchases, as_of, inv_days):
     ccc = (rec_days + inv_days - pay_days) if None not in (rec_days, inv_days, pay_days) else None
  
     stock_value = db.query(func.sum(InventoryItem.value)).scalar() or 0
+
+    pay_age = {b: 0 for b in AGEING_ORDER}
+    for r in pay:
+        pay_age[r[5]] = pay_age.get(r[5], 0) + r[4]
+
+    limits = {p.party_name: p.credit_limit for p in db.query(PartyMaster).all() if p.credit_limit}
+    outstanding = defaultdict(float)
+    for r in rec:
+        outstanding[r[1]] += r[4]
+    breaches = [[party, round(amt), round(limits[party])]
+                for party, amt in outstanding.items() if party in limits and amt > limits[party]]
+
+    behaviour = []
+    cleared = db.query(Voucher).filter(Voucher.voucher_type == "Receipt", Voucher.status == "Cleared").all()
+    lags = defaultdict(list)
+    for v in cleared:
+        if v.due_date and v.voucher_date:
+            lags[v.party_name].append((v.voucher_date - v.due_date).days + 30)
+    for party, days in lags.items():
+        avg = sum(days) / len(days)
+        behaviour.append([party, round(avg, 1), "Late" if avg > 35 else "On time"])
+    behaviour.sort(key=lambda r: -r[1])
+
+    cash_bank = {"cash_in": 0, "cash_out": 0, "bank_in": 0, "bank_out": 0}
+    for v in db.query(Voucher).filter(Voucher.voucher_type.in_(["Receipt", "Payment"])).all():
+        key_in = "cash_in" if v.payment_mode == "Cash" else "bank_in"
+        key_out = "cash_out" if v.payment_mode == "Cash" else "bank_out"
+        if v.voucher_type == "Receipt":
+            cash_bank[key_in] += v.amount
+        else:
+            cash_bank[key_out] += v.amount
+
+    due_today = sum(r[4] for r in rec + pay if r[3] == as_of.isoformat())
+
     return {
         "receivables": round(receivables),
         "overdue_receivables": round(sum(r[4] for r in rec if r[6] == "Overdue")),
@@ -258,6 +374,13 @@ def _cashflow_section(db, sales, purchases, as_of, inv_days):
             ["Inventory days", _days(inv_days)],
             ["Cash conversion cycle", _days(ccc)],
         ],
+        "payable_ageing": {k: round(v) for k, v in pay_age.items()},
+        "credit_breaches": breaches,
+        "payment_behaviour": behaviour[:8],
+        "cash_bank": {k: round(v) for k, v in cash_bank.items()},
+        "due_today": round(due_today),
+        "forecast_in": round(receivables),
+        "forecast_out": round(payables),
     }
  
  
@@ -290,11 +413,42 @@ def build_summary(db: Session, period: str = "monthly"):
     }
  
     sales_s["trend"] = overview["trend"]   # Sales page draws this even without 'overview' access
- 
+
+    # sales vs target for the window's month
+    month_key = end.strftime("%Y-%m")
+    targets = db.query(SalesTarget).filter(SalesTarget.month == month_key).all()
+    actual_by = defaultdict(float)
+    for v in cur_sales:
+        actual_by[v.party_name] += _net(v)
+    sales_s["targets"] = [[t.party_name, round(t.target_amount), round(actual_by.get(t.party_name, 0)),
+                           round(actual_by.get(t.party_name, 0) - t.target_amount)]
+                          for t in sorted(targets, key=lambda x: x.party_name)[:12]]
+
+    purch_s["vs_stock"] = []
+    stock_by = {it.product: it for it in db.query(InventoryItem).all()}
+    bought = defaultdict(float)
+    sold_qty = defaultdict(float)
+    for v in cur_purchases:
+        bought[v.product] += v.quantity or 0
+    for v in cur_sales:
+        sold_qty[v.product] += v.quantity or 0
+    for product in sorted(set(bought) | set(sold_qty) | set(stock_by))[:12]:
+        it = stock_by.get(product)
+        purch_s["vs_stock"].append([
+            product, round(bought.get(product, 0)), round(sold_qty.get(product, 0)),
+            round(it.quantity) if it else 0, it.branch if it else "—",
+        ])
+
     return {
         "period": period, "label": PERIOD_LABELS[period],
         "window": {"start": start.isoformat(), "end": end.isoformat()},
         "overview": overview, "sales": sales_s, "purchases": purch_s,
         "inventory": inv_s, "cashflow": cash_s,
+        "filters": {
+            "products": sorted({v.product for v in sales + purchases if v.product}),
+            "customers": sorted({v.party_name for v in sales}),
+            "suppliers": sorted({v.party_name for v in purchases}),
+            "godowns": sorted({it.branch for it in db.query(InventoryItem).all() if it.branch}),
+        },
     }
  

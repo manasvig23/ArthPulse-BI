@@ -1,22 +1,22 @@
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, APIRouter
-import subprocess
-import os
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+
 from app.aichat import ai_service
-from . import auth, compliance, rules, summaries
+from . import auth, compliance, export_files, forecasts, quality, recommendations, rules, schema, summaries, tally_sync
 from .database import Base, SessionLocal, engine, get_db
-from .models import User
+from .models import InventoryItem, Recommendation, User, Voucher
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """On startup: make sure every table exists, clear leftover demo accounts, ensure an admin exists."""
     Base.metadata.create_all(bind=engine)
+    schema.ensure_schema()
     db = SessionLocal()
     try:
         removed = auth.purge_legacy_demo_users(db)
@@ -78,31 +78,43 @@ def roles_overview(_user: User = Depends(auth.require_area("users")), db: Sessio
                    "active": u.is_active} for u in db.query(User).order_by(User.id).all()],
     }
 
-# ------------------------------------------------------------- tally local sync
-router = APIRouter()
-@router.post("/api/sync/tally")
-async def sync_from_tally():
-    try:
-        # Option A: Run your Python ingestion script that processes the filtered Tally dataset
-        script_path = os.path.join("backend", "services", "tally_sync.py")
-        
-        # Alternatively, call your internal Python function directly:
-        # result = process_tally_sync_data()
-        
-        # Simulating execution of your sync pipeline:
-        # subprocess.run(["python", script_path], check=True)
+# ------------------------------------------------------------- tally sync
+class SyncBody(BaseModel):
+    company: str | None = None
 
-        return {
-            "status": "success", 
-            "message": "Data synchronized successfully from TallyPrime educational dataset.",
-            "synced_records": {
-                "sales_vouchers": 45,
-                "purchase_vouchers": 30,
-                "ledgers_updated": 12
-            }
-        }
+
+@app.get("/api/sync/status")
+def sync_status(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    info = tally_sync.tally_status()
+    info["last"] = tally_sync.last_sync(db)
+    info["can_sync"] = "users" in auth.areas_for(user)
+    return info
+
+
+@app.post("/api/sync/tally")
+def sync_from_tally(body: SyncBody | None = None, user: User = Depends(auth.require_area("users")),
+                    db: Session = Depends(get_db)):
+    try:
+        return tally_sync.sync_from_tally(db, (body.company if body else None))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.post("/api/sync/synthetic")
+def sync_synthetic(_user: User = Depends(auth.require_area("users")), db: Session = Depends(get_db)):
+    try:
+        return tally_sync.reload_synthetic(db)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/sync/push-educational")
+def push_educational(body: SyncBody | None = None, _user: User = Depends(auth.require_area("users"))):
+    try:
+        return tally_sync.push_educational_to_tally(body.company if body else None)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
 
 # ------------------------------------------------------------- dashboards
 @app.get("/api/sales")
@@ -254,21 +266,136 @@ class RecommendationFeedback(BaseModel):
     action: str  # "saved", "dismissed", "useful", "not_useful"
 
 @app.post("/api/ai/chat")
-def chat_with_arth_ai(payload: ChatRequest):
-    """
-    Endpoint for the AI chat assistant. Allows users to ask business questions in normal English,
-    grounded strictly in approved dashboard records.
-    """
-    result = ai_service.answer_query(user_prompt=payload.question, period=payload.period)
-    return result
+def chat_with_arth_ai(payload: ChatRequest, _user: User = Depends(auth.get_current_user)):
+    return ai_service.answer_query(user_prompt=payload.question, period=payload.period)
+
+
+@app.get("/api/recommendations")
+def get_recommendations(period: str = "monthly", _user: User = Depends(auth.get_current_user),
+                        db: Session = Depends(get_db)):
+    if db.query(Recommendation).count() == 0:
+        recommendations.refresh_recommendations(db, period)
+    return recommendations.list_recommendations(db)
+
+
+@app.post("/api/recommendations/refresh")
+def refresh_recs(period: str = "monthly", _user: User = Depends(auth.get_current_user),
+                 db: Session = Depends(get_db)):
+    return recommendations.refresh_recommendations(db, period)
+
 
 @app.post("/api/ai/recommendation-feedback")
-def submit_recommendation_feedback(payload: RecommendationFeedback):
-    """
-    Logs user feedback on AI recommendation cards for demonstration and review.
-    """
-    # In a full production app, save this to sqlite database table 'recommendation_feedback'
+def submit_recommendation_feedback(payload: RecommendationFeedback,
+                                   _user: User = Depends(auth.get_current_user),
+                                   db: Session = Depends(get_db)):
+    try:
+        row = recommendations.set_feedback(db, payload.recommendation_id, payload.action)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="No such recommendation.")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "success", "recommendation": row}
+
+
+@app.get("/api/forecasts")
+def get_forecasts(_user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    return forecasts.build_forecasts(db)
+
+
+@app.get("/api/quality")
+def get_quality(_user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    return quality.build_quality(db)
+
+
+@app.get("/api/explainability")
+def get_explain(_user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    from .explainability import explain_sales_drivers
+    return explain_sales_drivers(db)
+
+
+@app.get("/api/vouchers/{voucher_id}")
+def voucher_detail(voucher_id: int, user: User = Depends(auth.get_current_user),
+                   db: Session = Depends(get_db)):
+    v = db.query(Voucher).filter(Voucher.id == voucher_id).first()
+    if v is None:
+        raise HTTPException(status_code=404, detail="Voucher not found.")
+    area = {"Sales": "sales", "Purchase": "purchases", "Receipt": "cashflow", "Payment": "cashflow"}.get(v.voucher_type)
+    if area and area not in auth.areas_for(user) and "overview" not in auth.areas_for(user):
+        raise HTTPException(status_code=403, detail="Your role cannot open that voucher.")
     return {
-        "status": "success", 
-        "message": f"Successfully marked recommendation {payload.recommendation_id} as {payload.action}."
+        "id": v.id, "date": v.voucher_date.isoformat() if v.voucher_date else None,
+        "type": v.voucher_type, "party": v.party_name, "product": v.product,
+        "amount": v.amount, "returns": v.returns_amount, "invoice": v.invoice_no,
+        "city": v.city, "state": v.state, "pincode": v.pincode, "gstin": v.gstin,
+        "gst": v.gst_amount, "mode": v.payment_mode, "status": v.status,
+        "due_date": v.due_date.isoformat() if v.due_date else None,
+        "po": v.po_number, "quantity": v.quantity, "received": v.received_quantity,
+        "discount_pct": v.discount_pct, "territory": v.territory, "salesperson": v.salesperson,
+        "godown": v.godown, "segment": v.segment,
     }
+
+
+class StockSettings(BaseModel):
+    reorder_level: float | None = None
+    safety_stock: float | None = None
+    lead_time_days: float | None = None
+
+
+@app.patch("/api/inventory/{sku}")
+def update_stock_settings(sku: str, body: StockSettings,
+                          _user: User = Depends(auth.require_area("users")),
+                          db: Session = Depends(get_db)):
+    item = db.query(InventoryItem).filter(InventoryItem.sku == sku).first()
+    if item is None:
+        raise HTTPException(status_code=404, detail="SKU not found.")
+    if body.reorder_level is not None:
+        item.reorder_level = body.reorder_level
+    if body.safety_stock is not None:
+        item.safety_stock = body.safety_stock
+    if body.lead_time_days is not None:
+        item.lead_time_days = body.lead_time_days
+    db.commit()
+    return {"sku": item.sku, "reorder_level": item.reorder_level,
+            "safety_stock": item.safety_stock, "lead_time_days": item.lead_time_days}
+
+
+@app.get("/api/export/excel")
+def export_excel(period: str = "monthly", user: User = Depends(auth.get_current_user),
+                 db: Session = Depends(get_db)):
+    sheets = {}
+    if "sales" in auth.areas_for(user):
+        sheets["Sales"] = [["Customer", "Product", "Territory", "Salesperson", "Amount", "Returns", "Segment"],
+                           *rules.get_sales_table(db)]
+    if "purchases" in auth.areas_for(user):
+        sheets["Purchases"] = [["PO", "Supplier", "Product", "Qty", "Received", "Variance", "DN", "Status"],
+                               *rules.get_purchase_table(db)]
+    if "inventory" in auth.areas_for(user):
+        sheets["Inventory"] = [["SKU", "Product", "Category", "Godown", "Qty", "Value", "Movement", "Risk"],
+                               *rules.get_inventory_table(db)]
+    if "cashflow" in auth.areas_for(user):
+        sheets["Payments"] = [["Invoice", "Party", "Type", "Due", "Amount", "Ageing", "Status"],
+                              *rules.get_payment_table(db)]
+    if not sheets:
+        raise HTTPException(status_code=403, detail="Nothing to export for this role.")
+    data = export_files.excel_workbook(sheets)
+    return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f"attachment; filename=arthpulse-{period}.xlsx"})
+
+
+@app.get("/api/export/pdf")
+def export_pdf(period: str = "monthly", user: User = Depends(auth.get_current_user),
+               db: Session = Depends(get_db)):
+    s = summaries.build_summary(db, period)
+    o = s.get("overview") or {}
+    lines = [
+        f"Period: {s.get('label')} ({s['window']['start']} to {s['window']['end']})",
+        f"Net sales {o.get('net_sales')}, receivables {o.get('receivables')}, stock {o.get('stock_value')}.",
+        "ArthPulse suggestions only — the owner decides.",
+    ]
+    tables = []
+    if "sales" in auth.areas_for(user):
+        tables.append(("Sales (sample)", [["Customer", "Product", "Amount"],
+                                          *[[r[0], r[1], r[4]] for r in rules.get_sales_table(db)[:15]]]))
+    data = export_files.pdf_report("ArthPulse executive report", lines, tables)
+    return Response(data, media_type="application/pdf",
+                    headers={"Content-Disposition": f"attachment; filename=arthpulse-{period}.pdf"})

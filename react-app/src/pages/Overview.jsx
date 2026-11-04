@@ -2,6 +2,7 @@ import Kpi, { KpiGrid } from "../components/Kpi.jsx";
 import PageHeading from "../components/PageHeading.jsx";
 import StatusBadge from "../components/StatusBadge.jsx";
 import { TrendChart } from "../components/Charts.jsx";
+import RecCards from "../components/RecCards.jsx";
 import { formatMoney, growthText, growthTone } from "../format.js";
 
 function greeting() {
@@ -9,8 +10,9 @@ function greeting() {
   return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
 }
 
-export default function Overview({ data, onNavigate, user }) {
+export default function Overview({ data, onNavigate, user, notify }) {
   const o = data.summary.overview;
+  const fc = data.forecasts?.sales;
 
   return (
     <section className="page active">
@@ -57,6 +59,23 @@ export default function Overview({ data, onNavigate, user }) {
           {data.alerts.length === 0 && <p className="empty">No active alerts.</p>}
         </article>
       </div>
+
+      {fc && (
+        <article className="card" style={{ marginBottom: 18 }}>
+          <p className="card-label">WHAT MAY HAPPEN NEXT</p>
+          <h2>Sales forecast ({fc.next_month})</h2>
+          <p className="subtext">
+            {fc.forecast == null ? fc.method : `${formatMoney(fc.forecast)} · ${fc.method}`}
+            {data.forecasts?.cash && ` Expected cash in ${formatMoney(data.forecasts.cash.expected_in)}, out ${formatMoney(data.forecasts.cash.expected_out)}.`}
+          </p>
+        </article>
+      )}
+
+      <article className="card">
+        <p className="card-label">WHAT TO CONSIDER</p>
+        <h2>Recommendation cards</h2>
+        <RecCards items={data.recommendations} notify={notify} />
+      </article>
     </section>
   );
 }

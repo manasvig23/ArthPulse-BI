@@ -28,7 +28,7 @@ import pandas as pd
  
 from .database import Base, engine, SessionLocal
 from .models import (Voucher, InventoryItem, SupplierProfile,
-                     Gstr2bInvoice, GstReturn)
+                     Gstr2bInvoice, GstReturn, PartyMaster, SalesTarget, StockMovement)
 from .rules import REFERENCE_DATE
  
 Base.metadata.create_all(bind=engine)
@@ -47,6 +47,10 @@ SALES_COLUMNS = {
     "invoice": ["Invoice No", "Voucher No.", "Vch No."],        # optional
     "gstin": ["GSTIN", "GSTIN/UIN"],                            # optional
     "gst": ["GST", "GST Amount", "Tax Amount"],                 # optional
+    "city": ["City"],                                           # optional
+    "state": ["State"],                                         # optional
+    "pincode": ["Pincode", "Pin Code"],                         # optional
+    "discount": ["Discount %", "Discount"],                     # optional
 }
 PURCHASE_COLUMNS = {
     "date": ["Date"],
@@ -103,6 +107,32 @@ STOCK_COLUMNS = {
     "category": ["Category", "Stock Group", "Under"],           # optional
     "godown": ["Godown", "Location", "Branch"],                 # optional
     "reorder": ["Reorder Level", "Reorder Qty"],                # optional
+    "lead": ["Lead Time Days", "Lead Time"],                    # optional
+    "safety": ["Safety Stock"],                                 # optional
+}
+PARTY_COLUMNS = {
+    "party": ["Party", "Particulars", "Name", "Customer"],
+    "territory": ["Territory"],
+    "salesperson": ["Salesperson", "Sales Person"],
+    "city": ["City"],
+    "state": ["State"],
+    "pincode": ["Pincode", "Pin Code"],
+    "credit": ["Credit Limit"],
+    "gstin": ["GSTIN"],
+}
+TARGET_COLUMNS = {
+    "month": ["Month"],
+    "party": ["Customer", "Party", "Particulars"],
+    "target": ["Target Amount", "Target"],
+}
+MOVE_COLUMNS = {
+    "date": ["Date"],
+    "vtype": ["Vch Type", "Voucher Type"],
+    "item": ["Item Name", "Stock Item"],
+    "godown": ["Godown", "Location"],
+    "inward": ["Inward Qty"],
+    "outward": ["Outward Qty"],
+    "batch": ["Batch"],
 }
 REQUIRED = {
     "sales": ("date", "party", "amount"),
@@ -112,6 +142,9 @@ REQUIRED = {
     "profiles": ("party",),
     "gstr2b": ("month", "gstin", "invoice", "tax"),
     "returns": ("month", "gstr1", "paid", "itc"),
+    "parties": ("party",),
+    "targets": ("month", "party", "target"),
+    "movements": ("date", "item"),
 }
  
  
@@ -215,6 +248,10 @@ def import_sales(path, db):
             invoice_no=_text(_val(row, cols["invoice"])),
             gstin=_text(_val(row, cols["gstin"])),
             gst_amount=_clean_amount(_val(row, cols["gst"])),
+            city=_text(_val(row, cols.get("city"))),
+            state=_text(_val(row, cols.get("state"))),
+            pincode=_text(_val(row, cols.get("pincode"))),
+            discount_pct=_clean_amount(_val(row, cols.get("discount"))),
             segment="Active",
         ))
         n += 1
@@ -316,6 +353,8 @@ def import_stock(path, db):
             value=_clean_amount(_val(row, cols["value"])),
             movement="Unclassified",
             reorder_level=float(_val(row, cols["reorder"], 20)),
+            lead_time_days=float(_val(row, cols.get("lead"), 7) or 7),
+            safety_stock=float(_val(row, cols.get("safety"), 10) or 10),
         ))
         n += 1
     return n
@@ -379,6 +418,115 @@ def import_gst_returns(path, db):
  
  
 # ------------------------------------------------- computed enrichments
+def import_parties(path, db):
+    df = _read(path)
+    cols = _map_columns(df, PARTY_COLUMNS, "parties", path)
+    if not cols:
+        return 0
+    n = 0
+    for _, row in df.iterrows():
+        party = _party(row, cols)
+        if not party:
+            continue
+        db.add(PartyMaster(
+            party_name=party, kind="customer",
+            territory=_text(_val(row, cols.get("territory"))),
+            salesperson=_text(_val(row, cols.get("salesperson"))),
+            city=_text(_val(row, cols.get("city"))),
+            state=_text(_val(row, cols.get("state"))),
+            pincode=_text(_val(row, cols.get("pincode"))),
+            credit_limit=_clean_amount(_val(row, cols.get("credit"))),
+            gstin=_text(_val(row, cols.get("gstin"))),
+        ))
+        n += 1
+    return n
+
+
+def import_targets(path, db):
+    df = _read(path)
+    cols = _map_columns(df, TARGET_COLUMNS, "targets", path)
+    if not cols:
+        return 0
+    n = 0
+    for _, row in df.iterrows():
+        party = _party(row, cols)
+        if not party:
+            continue
+        db.add(SalesTarget(
+            month=str(_val(row, cols["month"])).strip()[:7],
+            party_name=party,
+            target_amount=_clean_amount(_val(row, cols["target"])),
+        ))
+        n += 1
+    return n
+
+
+def import_movements(path, db):
+    df = _read(path)
+    cols = _map_columns(df, MOVE_COLUMNS, "movements", path)
+    if not cols:
+        return 0
+    n = 0
+    for _, row in df.iterrows():
+        item = _val(row, cols["item"])
+        if item is None or str(item).strip().lower() in SKIP_PARTIES:
+            continue
+        db.add(StockMovement(
+            movement_date=_parse_date(_val(row, cols["date"])),
+            voucher_type=_text(_val(row, cols.get("vtype"))),
+            product=str(item).strip(),
+            godown=_text(_val(row, cols.get("godown"))) or "Main",
+            inward_qty=_clean_amount(_val(row, cols.get("inward"))),
+            outward_qty=_clean_amount(_val(row, cols.get("outward"))),
+            batch=_text(_val(row, cols.get("batch"))),
+        ))
+        n += 1
+    return n
+
+
+def apply_party_geo(db):
+    parties = {p.party_name: p for p in db.query(PartyMaster).all()}
+    for v in db.query(Voucher).filter(Voucher.voucher_type == "Sales").all():
+        p = parties.get(v.party_name)
+        if not p:
+            continue
+        v.city = v.city or p.city
+        v.state = v.state or p.state
+        v.pincode = v.pincode or p.pincode
+        v.territory = v.territory if v.territory and v.territory != "Unassigned" else (p.territory or v.territory)
+        v.salesperson = v.salesperson if v.salesperson and v.salesperson != "Unassigned" else (p.salesperson or v.salesperson)
+
+
+def load_synthetic_bundle(db, folder):
+    """Load every Excel file the generator writes from synthetic_data/."""
+    from pathlib import Path
+    folder = Path(folder)
+    mapping = [
+        (folder / "sales_register.xlsx", import_sales, "sales"),
+        (folder / "purchase_register.xlsx", import_purchases, "purchases"),
+        (folder / "receipts_payments.xlsx", import_payments, "payments"),
+        (folder / "stock_summary.xlsx", import_stock, "stock"),
+        (folder / "supplier_profile.xlsx", import_profiles, "profiles"),
+        (folder / "gstr2b_invoices.xlsx", import_gstr2b, "gstr2b"),
+        (folder / "gst_returns.xlsx", import_gst_returns, "returns"),
+        (folder / "customer_profile.xlsx", import_parties, "parties"),
+        (folder / "sales_targets.xlsx", import_targets, "targets"),
+        (folder / "stock_movement.xlsx", import_movements, "movements"),
+    ]
+    counts = {}
+    for path, fn, label in mapping:
+        if path.exists():
+            counts[label] = fn(str(path), db)
+        else:
+            counts[label] = 0
+    db.flush()
+    apply_party_geo(db)
+    compute_segments(db)
+    compute_movement(db)
+    db.commit()
+    return counts
+
+
 def compute_segments(db):
     """New / Inactive / Growing / Declining / Active, from sales history."""
     by_party = defaultdict(list)
