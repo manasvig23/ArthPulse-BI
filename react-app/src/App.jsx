@@ -1,3 +1,4 @@
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import { downloadBinary, getJson, getToken, setToken, useDashboardData } from "./api.js";
 import { downloadCsv, formatMoney } from "./format.js";
@@ -38,9 +39,42 @@ const NAV = [
 const PERIODS = [
   ["monthly", "This month"], ["weekly", "This week"], ["daily", "Today"], ["yearly", "This year"],
 ];
+
+const COMPARISONS = [
+  ["previous_period", "Previous period"],
+  ["previous_month", "Previous month"],
+  ["previous_year", "Previous year"],
+  ["none", "No comparison"],
+];
+
 const PERIOD_AWARE = ["overview", "sales", "purchases", "reports"];
 
 const initials = name => name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase();
+
+function getFinancialYears() {
+  const today = new Date();
+  const currentYear = today.getMonth() >= 3 ? today.getFullYear() : today.getFullYear() - 1;
+
+  return Array.from({ length: 7 }, (_, index) => {
+    const start = currentYear - index;
+    return `${start}-${String(start + 1).slice(-2)}`;
+  });
+}
+
+const FINANCIAL_YEARS = getFinancialYears();
+
+function buildFilterQuery(period, filters = {}) {
+  const params = new URLSearchParams();
+  params.set("period", period);
+
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && String(value).trim() !== "") {
+      params.set(key, String(value).trim());
+    }
+  });
+
+  return params.toString();
+}
 
 // Small status chips shown beside sidebar items, computed from the loaded data.
 function navBadges(data) {
@@ -116,7 +150,6 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [checking, setChecking] = useState(() => !!getToken());
 
-  // returning visitor: confirm the saved token is still good
   useEffect(() => {
     if (!getToken()) return;
     getJson("/api/auth/me")
@@ -125,7 +158,6 @@ export default function App() {
       .finally(() => setChecking(false));
   }, []);
 
-  // re-reads the signed-in user (e.g. after they change their own password)
   const refreshUser = useCallback(() => {
     getJson("/api/auth/me").then(setUser).catch(() => {});
   }, []);
@@ -158,21 +190,73 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
   const [chatOpen, setChatOpen] = useState(false);
   const toastTimer = useRef(null);
 
-  const { data, loading, error, reload } = useDashboardData(period, user.areas, onSignOut);
+  const [filters, setFilters] = useState({
+    start_date: "",
+    end_date: "",
+    financial_year: "",
+    product: "",
+    customer: "",
+    supplier: "",
+    location: "",
+    comparison: "previous_period",
+  });
+
+  const { data, loading, error, reload } = useDashboardData(
+    period,
+    user.areas,
+    onSignOut,
+    filters
+  );
 
   useEffect(() => {
     const onHash = () => setPage(pageFromHash());
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
-  }); // re-bound each render so it always sees the current allowed list
+  });
 
   useEffect(() => { document.body.classList.toggle("dark", dark); }, [dark]);
+
+  useEffect(() => {
+    return () => clearTimeout(toastTimer.current);
+  }, []);
 
   const notify = useCallback(message => {
     setToast(message);
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(""), 2600);
   }, []);
+
+  const updateFilter = (key, value) => {
+    setFilters(current => {
+      const next = { ...current, [key]: value };
+
+      // A custom date range and financial year are mutually exclusive.
+      if (key === "financial_year" && value) {
+        next.start_date = "";
+        next.end_date = "";
+      }
+      if ((key === "start_date" || key === "end_date") && value) {
+        next.financial_year = "";
+      }
+
+      return next;
+    });
+  };
+
+  const resetFilters = () => {
+    setFilters({
+      start_date: "",
+      end_date: "",
+      financial_year: "",
+      product: "",
+      customer: "",
+      supplier: "",
+      location: "",
+      comparison: "previous_period",
+    });
+    setPeriod("monthly");
+    notify("Dashboard filters cleared.");
+  };
 
   const navigate = id => {
     if (!allowed.includes(id)) return notify("Your role cannot open that section.");
@@ -199,6 +283,7 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
           [r.name, f.severity, f.party, f.title, f.exposure, f.action])),
       ],
     };
+
     const rows = sources[page];
     if (!rows) return notify("Nothing to export on this page.");
     downloadCsv(page, rows);
@@ -207,20 +292,27 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
 
   const exportExcel = async () => {
     try {
-      await downloadBinary(`/api/export/excel?period=${period}`, `arthpulse-${period}.xlsx`);
+      const query = buildFilterQuery(period, filters);
+      await downloadBinary(`/api/export/excel?${query}`, `arthpulse-${period}.xlsx`);
       notify("Excel workbook downloaded.");
-    } catch (e) { notify(e.message); }
+    } catch (e) {
+      notify(e.message);
+    }
   };
+
   const exportPdf = async () => {
     try {
-      await downloadBinary(`/api/export/pdf?period=${period}`, `arthpulse-${period}.pdf`);
+      const query = buildFilterQuery(period, filters);
+      await downloadBinary(`/api/export/pdf?${query}`, `arthpulse-${period}.pdf`);
       notify("PDF report downloaded.");
-    } catch (e) { notify(e.message); }
+    } catch (e) {
+      notify(e.message);
+    }
   };
 
   const onPeriodChange = value => {
     setPeriod(value);
-    notify(`Dashboard updated for ${PERIODS.find(p => p[0] === value)[1].toLowerCase()}.`);
+    notify(`Dashboard updated for ${value}.`);
   };
 
   const Page = PAGES[page].component;
@@ -237,6 +329,19 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
     if (alertCount > 0) return `${alertCount} ${alertCount === 1 ? "alert needs" : "alerts need"} your attention.`;
     return "No open risks right now.";
   })();
+
+  const filterInputStyle = {
+    minWidth: "125px",
+    maxWidth: "180px",
+    padding: "8px 10px",
+    borderRadius: "8px",
+    border: "1px solid var(--border, #d1d5db)",
+    background: "var(--surface, transparent)",
+    color: "inherit",
+    font: "inherit",
+    fontSize: "12px",
+  };
+
   const insightTarget = allowed.includes("compliance") ? "compliance" : allowed.includes("alerts") ? "alerts" : allowed[0];
 
   return (
@@ -276,8 +381,8 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
             <span className="copilot-icon"><Icon name="spark" size={14} /></span>
             <strong>Arth AI Copilot</strong>
           </div>
-            <p>{insight}</p>
-            <button onClick={() => setChatOpen(true)}>Ask AI Assistant <Icon name="arrow" size={14} /></button>
+          <p>{insight}</p>
+          <button onClick={() => setChatOpen(true)}>Ask AI Assistant <Icon name="arrow" size={14} /></button>
         </div>
       </aside>
 
@@ -295,6 +400,7 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
                 {PERIODS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             )}
+
             {needsData && (
               <>
                 <button className="secondary-button" onClick={exportExcel}>Excel</button>
@@ -302,6 +408,7 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
                 <button className="primary-button" onClick={exportCurrent}>⇩ CSV</button>
               </>
             )}
+
             <button
               className="bell"
               aria-label={`Alerts (${alertCount})`}
@@ -310,6 +417,7 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
               <Icon name="bell" size={18} />
               {alertCount > 0 && <i className="bell-dot" />}
             </button>
+
             <UserMenu
               user={user}
               dark={dark}
@@ -317,11 +425,111 @@ function Dashboard({ user, onSignOut, onUserChanged }) {
               onSignOut={() => setConfirmOut(true)}
               onOpenAccess={allowed.includes("access") ? () => navigate("access") : null}
             />
+
             <button className="signout-button" onClick={() => setConfirmOut(true)} title="Sign out">
               <Icon name="logout" size={16} /><span>Sign out</span>
             </button>
           </div>
         </header>
+
+        {PERIOD_AWARE.includes(page) && (
+          <div
+            className="filter-toolbar"
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "center",
+              gap: "10px",
+              padding: "12px 20px",
+              borderBottom: "1px solid var(--border, #e5e7eb)",
+            }}
+          >
+            <strong style={{ fontSize: "12px", marginRight: "4px" }}>FILTERS</strong>
+
+            <input
+              type="date"
+              aria-label="Start date"
+              title="Start date"
+              value={filters.start_date}
+              onChange={e => updateFilter("start_date", e.target.value)}
+              style={filterInputStyle}
+            />
+
+            <input
+              type="date"
+              aria-label="End date"
+              title="End date"
+              min={filters.start_date || undefined}
+              value={filters.end_date}
+              onChange={e => updateFilter("end_date", e.target.value)}
+              style={filterInputStyle}
+            />
+
+            <select
+              aria-label="Indian financial year"
+              title="Indian financial year"
+              value={filters.financial_year}
+              onChange={e => updateFilter("financial_year", e.target.value)}
+              style={filterInputStyle}
+            >
+              <option value="">Financial year</option>
+              {FINANCIAL_YEARS.map(year => (
+                <option key={year} value={year}>{year}</option>
+              ))}
+            </select>
+
+            <input
+              type="text"
+              placeholder="Product"
+              aria-label="Filter by product"
+              value={filters.product}
+              onChange={e => updateFilter("product", e.target.value)}
+              style={filterInputStyle}
+            />
+
+            <input
+              type="text"
+              placeholder="Customer"
+              aria-label="Filter by customer"
+              value={filters.customer}
+              onChange={e => updateFilter("customer", e.target.value)}
+              style={filterInputStyle}
+            />
+
+            <input
+              type="text"
+              placeholder="Supplier"
+              aria-label="Filter by supplier"
+              value={filters.supplier}
+              onChange={e => updateFilter("supplier", e.target.value)}
+              style={filterInputStyle}
+            />
+
+            <input
+              type="text"
+              placeholder="Location / Godown"
+              aria-label="Filter by location or godown"
+              value={filters.location}
+              onChange={e => updateFilter("location", e.target.value)}
+              style={filterInputStyle}
+            />
+
+            <select
+              aria-label="Comparison period"
+              value={filters.comparison}
+              onChange={e => updateFilter("comparison", e.target.value)}
+              style={filterInputStyle}
+            >
+              {COMPARISONS.map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+
+            <button className="secondary-button" onClick={resetFilters}>
+              Reset filters
+            </button>
+          </div>
+        )}
 
         {user.default_password && (
           <div className="default-banner">

@@ -118,7 +118,7 @@ def refresh_recommendations(db: Session, period="monthly") -> list[dict]:
     # 6. Compliance → recommendation
     for rule in compliance.build_compliance(db)["rules"]:
         for f in rule["findings"][:3]:
-            _upsert(db, f"comp:{rule['id']}:{f['party']}",
+            _upsert(db, f"comp:{rule['id']}:{f['party']}:{f['title']}",
                     kind="compliance",
                     title=f"{rule['name']}: {f['title']}",
                     reason=f["summary"],
